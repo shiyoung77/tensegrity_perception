@@ -62,7 +62,7 @@ def icp(src, tgt, max_iter=30, init=np.eye(4), inverse=False):
 def plane_detection_ransac(pcd: o3d.geometry.PointCloud,
                            inlier_thresh: float,
                            max_iterations: int = 1000,
-                           early_stop_thresh: float = 0.3,
+                           early_stop_thresh: float = 0.6,
                            visualize: bool = False):
     """detect plane (table) in a pointcloud for background removal
 
