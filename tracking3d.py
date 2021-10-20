@@ -1,14 +1,17 @@
+from genericpath import exists
 import os
 import time
 import copy
 import importlib
 import pprint
-import open3d as o3d
+
 import numpy as np
-from scipy import linalg as la
 import cv2
+import open3d as o3d
+from scipy import linalg as la
+import trimesh
+import pyrender
 from matplotlib import pyplot as plt
-from tqdm import tqdm
 from tqdm.contrib import tenumerate
 
 import utils
@@ -21,7 +24,7 @@ class Tracker:
         "blue": [0, 0, 255]
     }
 
-    def __init__(self, data_cfg, rod_mesh_file, tracker2D='csrt'):
+    def __init__(self, data_cfg, rod_mesh_file):
         self.data_cfg = data_cfg
         self.initialized = False
         self.trackers = dict()
@@ -30,15 +33,32 @@ class Tracker:
         self.hsv_ranges = dict()
         self.pose_results = {color: [] for color in self.data_cfg['end_cap_colors']}
 
-        # read rod mesh
-        self.rod_pcd = o3d.io.read_point_cloud(rod_mesh_file)
+        # read rod mesh for ICP
+        rod_mesh = o3d.io.read_triangle_mesh(rod_mesh_file)
+        self.rod_pcd = rod_mesh.sample_points_poisson_disk(5000)
         points = np.asarray(self.rod_pcd.points)
-        points -= points.mean(0)  # move point cloud center
+        offset = points.mean(0)
+        points -= offset  # move point cloud center
         points /= 1000  # scale points from millimeter to meter
+        o3d.visualization.draw_geometries([self.rod_pcd])
 
+        # initialize renderer
+        fuze_trimesh = trimesh.load(rod_mesh_file)
+        fuze_trimesh.apply_translation(-offset)
+        fuze_trimesh.apply_scale(1 / 1000)
+        self.rod_mesh = pyrender.Mesh.from_trimesh(fuze_trimesh)
+        cam_intr = np.array(self.data_cfg['cam_intr'])
+        fx, fy = cam_intr[0, 0], cam_intr[1, 1]
+        cx, cy = cam_intr[0, 2], cam_intr[1, 2]
+        camera = pyrender.IntrinsicsCamera(fx=fx, fy=fy, cx=cx, cy=cy)
+        light = pyrender.SpotLight(color=np.ones(3), intensity=3.0, innerConeAngle=np.pi/16.0)
+        self.camera_node = pyrender.Node(name='cam', camera=camera, matrix=np.eye(4))
+        self.light_node = pyrender.Node(name='light', light=light, matrix=np.eye(4))
+        self.renderer = pyrender.OffscreenRenderer(self.data_cfg['im_w'], self.data_cfg['im_h'])
 
     def initialize(self, color_im: np.ndarray, depth_im: np.ndarray, visualize: bool = True, compute_hsv: bool = True):
-        scene_pcd = utils.create_pcd(depth_im, self.data_cfg['cam_intr'], color_im, depth_trunc=0.6)
+        scene_pcd = utils.create_pcd(depth_im, self.data_cfg['cam_intr'], color_im, depth_trunc=self.data_cfg['depth_trunc'])
+        o3d.visualization.draw_geometries([scene_pcd])
         if 'cam_extr' not in self.data_cfg:
             plane_frame, _ = utils.plane_detection_ransac(scene_pcd, inlier_thresh=0.005, visualize=visualize)
             self.data_cfg['cam_extr'] = np.round(plane_frame, decimals=3)
@@ -154,6 +174,22 @@ class Tracker:
                 upperbound = np.array(end_cap_center_list[-1]) + half_length
                 vis_list.append(o3d.geometry.AxisAlignedBoundingBox(lowerbound, upperbound))
             o3d.visualization.draw_geometries(vis_list)
+
+            scene = pyrender.Scene(nodes=[self.camera_node, self.light_node])
+            m = np.array([
+                [1, 0, 0, 0],
+                [0, -1, 0, 0],
+                [0, 0, -1, 0],
+                [0, 0, 0, 1]
+            ])
+            for color in self.data_cfg['end_cap_colors']:
+                pose = self.data_cfg['cam_extr'] @ np.copy(self.pose_results[color][-1])
+                scene.add_node(pyrender.Node(name=f'{color}-rod', mesh=self.rod_mesh, matrix=m @ pose))
+
+            # pyrender.Viewer(scene)
+            rendered_color, rendered_depth = self.renderer.render(scene)
+            plt.imshow(rendered_depth)
+            plt.show()
         
         self.initialized = True
 
@@ -163,13 +199,16 @@ class Tracker:
         color_im_vis = cv2.cvtColor(color_im, cv2.COLOR_RGB2BGR)
 
         color_im_hsv = cv2.cvtColor(color_im, cv2.COLOR_RGB2HSV)        
-        scene_pcd_hsv = utils.create_pcd(depth_im, self.data_cfg['cam_intr'], color_im_hsv, depth_trunc=0.6,
+        scene_pcd_hsv = utils.create_pcd(depth_im, self.data_cfg['cam_intr'], color_im_hsv,
+                                         depth_trunc=self.data_cfg['depth_trunc'],
                                          cam_extr=self.data_cfg['cam_extr'])
         box_to_filter_table = o3d.geometry.AxisAlignedBoundingBox([-10, -10, 0.01], [10, 10, 0.3])
         scene_pcd_hsv = scene_pcd_hsv.crop(box_to_filter_table)
         
-        scene_pcd = utils.create_pcd(depth_im, self.data_cfg['cam_intr'], color_im, depth_trunc=0.6,
+        scene_pcd = utils.create_pcd(depth_im, self.data_cfg['cam_intr'], color_im,
+                                     depth_trunc=self.data_cfg['depth_trunc'],
                                      cam_extr=self.data_cfg['cam_extr'])
+        self.scene_pcd = scene_pcd
         # vis_list = []
         vis_list = [scene_pcd]
         reconstructed_rods = o3d.geometry.PointCloud()
@@ -216,7 +255,6 @@ class Tracker:
 
                         # randomly sample points around previous center
                         std = 0.005
-                        N = 50
                         sampled_pts = np.random.normal(loc=end_cap_center, scale=std, size=(100, 3))
                         sampled_pcd = o3d.geometry.PointCloud()
                         sampled_pcd.points = o3d.utility.Vector3dVector(sampled_pts)
@@ -227,9 +265,7 @@ class Tracker:
                         self.end_cap_centers[end_cap_name].append(end_cap_center)
 
                         # randomly sample points around previous center
-                        std = 0.005
-                        N = 100
-                        sampled_pts = np.random.normal(loc=end_cap_center, scale=std, size=(100, 3))
+                        sampled_pts = np.random.normal(loc=end_cap_center, scale=0.005, size=(100, 3))
                         sampled_pcd = o3d.geometry.PointCloud()
                         sampled_pcd.points = o3d.utility.Vector3dVector(sampled_pts)
                         sampled_pcd.paint_uniform_color(np.array(Tracker.ColorDict[color]) / 255)
@@ -243,94 +279,101 @@ class Tracker:
 
                         end_cap_center = np.asarray(end_cap_pcd.points).mean(axis=0)
                         self.end_cap_centers[end_cap_name].append(end_cap_center)
-                    # elif len(valid_indices) > 0:  # There are some points but not enough for ICP
-                    #     end_cap_pcd = cropped_cloud.select_by_index(valid_indices)
-                    #     end_cap_pcd.paint_uniform_color(np.array(Tracker.ColorDict[color]) / 255)
-                    #     end_cap_center = np.asarray(end_cap_pcd.points).mean(axis=0)
+                    elif len(valid_indices) > 0:  # There are some points but not enough for ICP
+                        end_cap_pcd = cropped_cloud.select_by_index(valid_indices)
+                        end_cap_pcd.paint_uniform_color(np.array(Tracker.ColorDict[color]) / 255)
+                        end_cap_center = np.asarray(end_cap_pcd.points).mean(axis=0)
 
+                        self.end_cap_centers[end_cap_name].append(end_cap_center)
+                        obs_pcd += end_cap_pcd
+
+                        # randomly sample points around previous center
+                        sampled_pts = np.random.normal(loc=end_cap_center, scale=0.005, size=(200, 3))
+                        sampled_pcd = o3d.geometry.PointCloud()
+                        sampled_pcd.points = o3d.utility.Vector3dVector(sampled_pts)
+                        sampled_pcd.paint_uniform_color(np.array(Tracker.ColorDict[color]) / 255)
+                        obs_pcd += sampled_pcd
+                    else:
+                        end_cap_center = self.end_cap_centers[end_cap_name][-1].copy() # reuse the previous end cap center
+                        self.end_cap_centers[end_cap_name].append(end_cap_center)
+
+                        # randomly sample points around previous center
+                        sampled_pts = np.random.normal(loc=end_cap_center, scale=0.005, size=(100, 3))
+                        sampled_pcd = o3d.geometry.PointCloud()
+                        sampled_pcd.points = o3d.utility.Vector3dVector(sampled_pts)
+                        sampled_pcd.paint_uniform_color(np.array(Tracker.ColorDict[color]) / 255)
+                        obs_pcd += sampled_pcd
+                    # else:
+                    #     fc = self.end_cap_centers[color + '-0'][-1]  # first end cap center
+                    #     cam_intr = np.array(self.data_cfg['cam_intr'])
+                    #     cam_extr = np.array(self.data_cfg['cam_extr'])
+                    #     fc_cam = (cam_extr @ np.array([fc[0], fc[1], fc[2], 1]))[:3]
+                    #     x1, y1, z1 = fc_cam
+
+                    #     sc = self.end_cap_centers[color + '-1'][-1]  # second end cap center
+                    #     sc_cam = (cam_extr @ np.array([sc[0], sc[1], sc[2], 1]))[:3]
+
+                    #     fx = cam_intr[0, 0]
+                    #     fy = cam_intr[1, 1]
+                    #     cx = cam_intr[0, 2]
+                    #     cy = cam_intr[1, 2]
+
+                    #     x = int(round(fx * sc_cam[0] / sc_cam[2] + cx))
+                    #     y = int(round(fy * sc_cam[1] / sc_cam[2] + cy))
+
+                    #     pt1 = (max(0, x - 30), min(color_im.shape[1], y - 30))
+                    #     pt2 = (max(0, x + 30), min(color_im.shape[0], y + 30))
+                    #     # cv2.rectangle(color_im_vis, pt1, pt2, Tracker.ColorDict[color], 2)
+                        
+                    #     mask = cv2.inRange(color_im_hsv, tuple(self.data_cfg['hsv_ranges'][color][0]),
+                    #                                     tuple(self.data_cfg['hsv_ranges'][color][1]))
+                    #     mask = mask.astype(bool)
+                    #     if color == 'red':
+                    #         mask2 = cv2.inRange(color_im_hsv, (0, 100, 50), (20, 255, 255), 2)
+                    #         mask = mask | mask2.astype(bool)
+                    #     color_im_vis[mask] = 0
+
+                    #     ys, xs = np.where(mask[pt1[1]:pt2[1], pt1[0]:pt2[0]])
+                    #     if len(ys) > 10:
+                    #         x_bar = int(np.mean(xs) + x - 30)
+                    #         y_bar = int(np.mean(ys) + y - 30)
+
+                    #         pt1 = (max(0, x_bar - 30), min(color_im.shape[1], y_bar - 30))
+                    #         pt2 = (max(0, x_bar + 30), min(color_im.shape[0], y_bar + 30))
+                    #         cv2.rectangle(color_im_vis, pt1, pt2, Tracker.ColorDict[color], 2)
+                    #     else:
+                    #         pc = self.end_cap_centers[end_cap_name][-1]
+                    #         X_prev, Y_prev, Z_prev = (cam_extr @ np.array([pc[0], pc[1], pc[2], 1]))[:3]
+                    #         x_bar = int(round(fx * X_prev / Z_prev + cx))
+                    #         y_bar = int(round(fy * Y_prev / Z_prev + cy))
+
+                    #     L = 0.3   # rod length
+                    #     A = (x_bar - cx) / fx
+                    #     B = (y_bar - cy) / fy
+                    #     a = A**2 + B**2 + 1
+                    #     b = -2*(A*x1 + B*y1 + z1)
+                    #     c = x1**2 + y1**2 + z1**2 - L**2
+                    #     Z_cam = (-b + np.sqrt(b**2 - 4*a*c)) / (2*a)
+                    #     X_cam = A*Z_cam
+                    #     Y_cam = B*Z_cam
+
+                    #     end_cap_center = (la.inv(cam_extr) @ np.array([X_cam, Y_cam, Z_cam, 1]))[:3]
                     #     self.end_cap_centers[end_cap_name].append(end_cap_center)
-                    #     obs_pcd += end_cap_pcd
 
                     #     # randomly sample points around previous center
                     #     std = 0.005
-                    #     N = 200
                     #     sampled_pts = np.random.normal(loc=end_cap_center, scale=std, size=(100, 3))
                     #     sampled_pcd = o3d.geometry.PointCloud()
                     #     sampled_pcd.points = o3d.utility.Vector3dVector(sampled_pts)
                     #     sampled_pcd.paint_uniform_color(np.array(Tracker.ColorDict[color]) / 255)
                     #     obs_pcd += sampled_pcd
-                    else:
-                        fc = self.end_cap_centers[color + '-0'][-1]  # first end cap center
-                        cam_intr = np.array(self.data_cfg['cam_intr'])
-                        cam_extr = np.array(self.data_cfg['cam_extr'])
-                        fc_cam = (cam_extr @ np.array([fc[0], fc[1], fc[2], 1]))[:3]
-                        x1, y1, z1 = fc_cam
 
-                        sc = self.end_cap_centers[color + '-1'][-1]  # second end cap center
-                        sc_cam = (cam_extr @ np.array([sc[0], sc[1], sc[2], 1]))[:3]
+                    #     lowerbound = end_cap_center - 0.025
+                    #     upperbound = end_cap_center + 0.025
+                    #     end_cap_bbox = o3d.geometry.AxisAlignedBoundingBox(lowerbound, upperbound)
+                    #     end_cap_bbox.color = np.array([1, 0, 0])
+                    #     vis_list.append(end_cap_bbox)
 
-                        fx = cam_intr[0, 0]
-                        fy = cam_intr[1, 1]
-                        cx = cam_intr[0, 2]
-                        cy = cam_intr[1, 2]
-
-                        x = int(round(fx * sc_cam[0] / sc_cam[2] + cx))
-                        y = int(round(fy * sc_cam[1] / sc_cam[2] + cy))
-
-                        pt1 = (max(0, x - 30), min(color_im.shape[1], y - 30))
-                        pt2 = (max(0, x + 30), min(color_im.shape[0], y + 30))
-                        # cv2.rectangle(color_im_vis, pt1, pt2, Tracker.ColorDict[color], 2)
-
-                        
-                        mask = cv2.inRange(color_im_hsv, tuple(self.data_cfg['hsv_ranges'][color][0]),
-                                                        tuple(self.data_cfg['hsv_ranges'][color][1]))
-                        mask = mask.astype(bool)
-                        if color == 'red':
-                            mask2 = cv2.inRange(color_im_hsv, (0, 100, 50), (20, 255, 255), 2)
-                            mask = mask | mask2.astype(bool)
-                        color_im_vis[mask] = 0
-
-                        ys, xs = np.where(mask[pt1[1]:pt2[1], pt1[0]:pt2[0]])
-                        if len(ys) > 10:
-                            x_bar = int(np.mean(xs) + x - 30)
-                            y_bar = int(np.mean(ys) + y - 30)
-
-                            pt1 = (max(0, x_bar - 30), min(color_im.shape[1], y_bar - 30))
-                            pt2 = (max(0, x_bar + 30), min(color_im.shape[0], y_bar + 30))
-                            cv2.rectangle(color_im_vis, pt1, pt2, Tracker.ColorDict[color], 2)
-                        else:
-                            pc = self.end_cap_centers[end_cap_name][-1]
-                            X_prev, Y_prev, Z_prev = (cam_extr @ np.array([pc[0], pc[1], pc[2], 1]))[:3]
-                            x_bar = int(round(fx * X_prev / Z_prev + cx))
-                            y_bar = int(round(fy * Y_prev / Z_prev + cy))
-
-                        L = 0.21   # rod length
-                        A = (x_bar - cx) / fx
-                        B = (y_bar - cy) / fy
-                        a = A**2 + B**2 + 1
-                        b = -2*(A*x1 + B*y1 + z1)
-                        c = x1**2 + y1**2 + z1**2 - L**2
-                        Z_cam = (-b + np.sqrt(b**2 - 4*a*c)) / (2*a)
-                        X_cam = A*Z_cam
-                        Y_cam = B*Z_cam
-
-                        end_cap_center = (la.inv(cam_extr) @ np.array([X_cam, Y_cam, Z_cam, 1]))[:3]
-                        self.end_cap_centers[end_cap_name].append(end_cap_center)
-
-                        # randomly sample points around previous center
-                        std = 0.005
-                        N = 200
-                        sampled_pts = np.random.normal(loc=end_cap_center, scale=std, size=(100, 3))
-                        sampled_pcd = o3d.geometry.PointCloud()
-                        sampled_pcd.points = o3d.utility.Vector3dVector(sampled_pts)
-                        sampled_pcd.paint_uniform_color(np.array(Tracker.ColorDict[color]) / 255)
-                        obs_pcd += sampled_pcd
-
-                        lowerbound = end_cap_center - 0.025
-                        upperbound = end_cap_center + 0.025
-                        end_cap_bbox = o3d.geometry.AxisAlignedBoundingBox(lowerbound, upperbound)
-                        end_cap_bbox.color = np.array([1, 0, 0])
-                        vis_list.append(end_cap_bbox)
                     end_cap_centers.append(end_cap_center)
 
             rod_pcd = copy.deepcopy(self.rod_pcd)
@@ -351,6 +394,8 @@ class Tracker:
 
             vis_list.append(obs_pcd)
             vis_list.append(reconstructed_rods)
+
+            self.estimation_cloud = scene_pcd + reconstructed_rods
 
         if visualizer is not None:
             visualizer.clear_geometries()
@@ -389,14 +434,16 @@ class Tracker:
 
 if __name__ == '__main__':
     dataset = 'dataset'
-    video_id = 'no_hooks0'
+    # video_id = 'no_hooks0'
+    video_id = '9-21_0'
     prefixes = sorted([i.split('.')[0] for i in os.listdir(os.path.join(dataset, video_id, 'color'))])
 
     data_cfg_module = importlib.import_module(f'{dataset}.{video_id}.config')
     data_cfg = data_cfg_module.get_config(read_cfg=True)
 
-    rod_mesh_file = 'pcd/yale/end_cap_with_rod.pcd'
-    tracker = Tracker(data_cfg, rod_mesh_file=rod_mesh_file, tracker2D='csrt')
+    rod_mesh_file = 'pcd/yale/untethered_rod_w_end_cap.ply'
+    # rod_mesh_file = 'pcd/yale/end_cap_with_rod.pcd'
+    tracker = Tracker(data_cfg, rod_mesh_file=rod_mesh_file)
 
     # initialize tracker with the first frame    
     color_path = os.path.join(dataset, video_id, 'color', f'{prefixes[0]}.png')
@@ -408,6 +455,10 @@ if __name__ == '__main__':
     data_cfg_module.write_config(tracker.data_cfg)
 
     # track frames
+    os.makedirs(os.path.join(dataset, video_id, "scene_cloud"), exist_ok=True)
+    os.makedirs(os.path.join(dataset, video_id, "estimation_cloud"), exist_ok=True)
+    os.makedirs(os.path.join(dataset, video_id, "raw_estimation"), exist_ok=True)
+
     visualizer = o3d.visualization.Visualizer()
     visualizer.create_window(width=data_cfg['im_w'], height=data_cfg['im_h'])
     for idx, prefix in tenumerate(prefixes[1:]):
@@ -416,3 +467,12 @@ if __name__ == '__main__':
         color_im = cv2.cvtColor(cv2.imread(color_path), cv2.COLOR_BGR2RGB)
         depth_im = cv2.imread(depth_path, cv2.IMREAD_UNCHANGED).astype(np.float32) / data_cfg['depth_scale']
         tracker.update(color_im, depth_im, visualizer=visualizer)
+        o3d.io.write_point_cloud(os.path.join(dataset, video_id, "scene_cloud", f"{idx:04d}.ply"), tracker.scene_pcd)
+        o3d.io.write_point_cloud(os.path.join(dataset, video_id, "estimation_cloud", f"{idx:04d}.ply"), tracker.estimation_cloud)
+        # visualizer.capture_screen_image(os.path.join(dataset, video_id, "raw_estimation", f"{idx:04d}.png"))
+
+    # pose_output_folder = os.path.join(dataset, video_id, "poses")
+    # os.makedirs(pose_output_folder, exist_ok=True)
+    # for color in tracker.data_cfg['end_cap_colors']:
+    #     poses = np.array(tracker.pose_results[color])
+    #     np.save(os.path.join(pose_output_folder, f'{color}.npy'), poses)
