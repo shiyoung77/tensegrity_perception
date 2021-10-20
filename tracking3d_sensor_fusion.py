@@ -9,7 +9,7 @@ import numpy as np
 import cv2
 import open3d as o3d
 from scipy import linalg as la
-from scipy import optimize
+from scipy.optimize import minimize
 import trimesh
 import pyrender
 from matplotlib import pyplot as plt
@@ -30,23 +30,33 @@ class Tracker:
         self.initialized = False
         self.trackers = dict()
         self.rois = dict()
-        self.end_cap_centers = dict()
         self.hsv_ranges = dict()
         self.pose_results = {color: [] for color in self.data_cfg['end_cap_colors']}
 
         # read rod mesh for ICP
         rod_mesh = o3d.io.read_triangle_mesh(rod_mesh_file)
-        self.rod_pcd = rod_mesh.sample_points_poisson_disk(5000)
+        self.rod_pcd = rod_mesh.sample_points_poisson_disk(3000)
         points = np.asarray(self.rod_pcd.points)
         offset = points.mean(0)
         points -= offset  # move point cloud center
-        points /= 1000  # scale points from millimeter to meter
-        o3d.visualization.draw_geometries([self.rod_pcd])
+        points /= self.data_cfg['rod_scale']  # scale points from millimeter to meter
+
+        # visualize rod and end caps
+        init_rod_pose = np.eye(4)
+        self.rod_length = self.data_cfg['rod_length']
+        rod_frame = utils.generate_coordinate_frame(init_rod_pose)
+        end_cap_pose_1 = init_rod_pose.copy()
+        end_cap_pose_1[:3, 3] += end_cap_pose_1[:3, 2] * self.rod_length / 2
+        end_cap_frame_1 = utils.generate_coordinate_frame(end_cap_pose_1)
+        end_cap_pose_2 = init_rod_pose.copy()
+        end_cap_pose_2[:3, 3] -= end_cap_pose_2[:3, 2] * self.rod_length / 2
+        end_cap_frame_2 = utils.generate_coordinate_frame(end_cap_pose_2)
+        o3d.visualization.draw_geometries([self.rod_pcd, rod_frame, end_cap_frame_1, end_cap_frame_2])
 
         # initialize renderer
         fuze_trimesh = trimesh.load(rod_mesh_file)
         fuze_trimesh.apply_translation(-offset)
-        fuze_trimesh.apply_scale(1 / 1000)
+        fuze_trimesh.apply_scale(1 / self.data_cfg["rod_scale"])
         self.rod_mesh = pyrender.Mesh.from_trimesh(fuze_trimesh)
         cam_intr = np.array(self.data_cfg['cam_intr'])
         fx, fy = cam_intr[0, 0], cam_intr[1, 1]
@@ -58,7 +68,8 @@ class Tracker:
         self.renderer = pyrender.OffscreenRenderer(self.data_cfg['im_w'], self.data_cfg['im_h'])
 
     def initialize(self, color_im: np.ndarray, depth_im: np.ndarray, visualize: bool = True, compute_hsv: bool = True):
-        scene_pcd = utils.create_pcd(depth_im, self.data_cfg['cam_intr'], color_im, depth_trunc=self.data_cfg['depth_trunc'])
+        scene_pcd = utils.create_pcd(depth_im, self.data_cfg['cam_intr'], color_im,
+                                     depth_trunc=self.data_cfg['depth_trunc'])
         o3d.visualization.draw_geometries([scene_pcd])
         if 'cam_extr' not in self.data_cfg:
             plane_frame, _ = utils.plane_detection_ransac(scene_pcd, inlier_thresh=0.005, visualize=visualize)
@@ -115,10 +126,10 @@ class Tracker:
         # estimate init rod transformation
         reconstructed_rods = o3d.geometry.PointCloud()
         for color, rois in self.data_cfg['init_end_cap_rois'].items():
-            # compute 3D centers of each end cap
             end_cap_centers = []
             obs_pcd = o3d.geometry.PointCloud()
-            for i, roi in enumerate(rois):
+
+            for roi in rois:
                 pt1 = (int(roi[0]), int(roi[1]))
                 pt2 = (pt1[0] + int(roi[2]), pt1[1] + int(roi[3]))
                 masked_depth_im = np.zeros_like(depth_im)
@@ -152,10 +163,10 @@ class Tracker:
                 masked_indices = np.where(labels == label)[0]
                 end_cap_pcd = end_cap_pcd.select_by_index(masked_indices)
 
-                obs_pcd += end_cap_pcd
                 end_cap_center = np.asarray(end_cap_pcd.points).mean(axis=0)
                 end_cap_centers.append(end_cap_center)
-                self.end_cap_centers.setdefault(color + '-' + str(i), []).append(end_cap_center)
+
+                obs_pcd += end_cap_pcd
             
             # compute rod pose given end cap centers
             init_pose = self.estimate_rod_pos_from_end_cap_centers(end_cap_centers)
@@ -168,14 +179,9 @@ class Tracker:
             self.pose_results[color].append(icp_result.transformation)
 
         if visualize:
-            vis_list = [scene_pcd, reconstructed_rods]
-            for _, end_cap_center_list in self.end_cap_centers.items():
-                half_length = 0.025
-                lowerbound = np.array(end_cap_center_list[-1]) - half_length
-                upperbound = np.array(end_cap_center_list[-1]) + half_length
-                vis_list.append(o3d.geometry.AxisAlignedBoundingBox(lowerbound, upperbound))
-            o3d.visualization.draw_geometries(vis_list)
+            o3d.visualization.draw_geometries([scene_pcd, reconstructed_rods])
 
+            # render rods given estimated poses
             scene = pyrender.Scene(nodes=[self.camera_node, self.light_node])
             m = np.array([
                 [1, 0, 0, 0],
@@ -189,14 +195,14 @@ class Tracker:
 
             # pyrender.Viewer(scene)
             rendered_color, rendered_depth = self.renderer.render(scene)
-            plt.imshow(rendered_depth)
+            plt.imshow(rendered_color)
             plt.show()
         
         self.initialized = True
 
 
     def update(self, color_im, depth_im, info, visualizer=None):
-        assert self.initialized, "[Error] You must initialize the tracker!"
+        assert self.initialized, "[Error] You must first initialize the tracker!"
         color_im_vis = cv2.cvtColor(color_im, cv2.COLOR_RGB2BGR)
 
         color_im_hsv = cv2.cvtColor(color_im, cv2.COLOR_RGB2HSV)        
@@ -213,21 +219,17 @@ class Tracker:
 
         vis_list = [scene_pcd]
         reconstructed_rods = o3d.geometry.PointCloud()
+
         for color in self.data_cfg['end_cap_colors']:
             obs_pcd = o3d.geometry.PointCloud()
-            # Start from the front end cap to the back end cap
-            end_cap_centers = []
+            prev_pose = self.pose_results[color][-1].copy()
+
             for i in range(2):
-                end_cap_name = color + '-' + str(i)
-                prev_end_cap_center = self.end_cap_centers[end_cap_name][-1]
-
-                half_length = 0.025
-                lowerbound = np.array(prev_end_cap_center) - half_length
-                upperbound = np.array(prev_end_cap_center) + half_length
-                end_cap_bbox = o3d.geometry.AxisAlignedBoundingBox(lowerbound, upperbound)
-                vis_list.append(end_cap_bbox)
-
-                cropped_cloud = scene_pcd_hsv.crop(end_cap_bbox)
+                end_cap_pos = prev_pose[:3, 3] + (-1)**(i + 1) * prev_pose[:3, 2] * self.rod_length / 2
+                points = np.asarray(scene_pcd_hsv.points)
+                dist = la.norm(points - end_cap_pos[None], axis=1)
+                valid_indices = np.where(dist < 0.03)[0]
+                cropped_cloud = scene_pcd_hsv.select_by_index(valid_indices)
                 points_hsv = np.asarray(cropped_cloud.colors) * 255
                 mask1 = np.all((points_hsv - self.data_cfg['hsv_ranges'][color][0]) > 0, axis=1)
                 mask2 = np.all((points_hsv - self.data_cfg['hsv_ranges'][color][1]) < 0, axis=1)
@@ -243,49 +245,36 @@ class Tracker:
                     end_cap_pcd = cropped_cloud.select_by_index(valid_indices)
                     end_cap_pcd.paint_uniform_color(np.array(Tracker.ColorDict[color]) / 255)
                     obs_pcd += end_cap_pcd
-
-                    end_cap_center = np.asarray(end_cap_pcd.points).mean(axis=0)
-                    self.end_cap_centers[end_cap_name].append(end_cap_center)
                 elif len(valid_indices) > 10:  # There are some points but not enough for ICP
                     end_cap_pcd = cropped_cloud.select_by_index(valid_indices)
                     end_cap_pcd.paint_uniform_color(np.array(Tracker.ColorDict[color]) / 255)
-                    end_cap_center = np.asarray(end_cap_pcd.points).mean(axis=0)
-
-                    self.end_cap_centers[end_cap_name].append(end_cap_center)
                     obs_pcd += end_cap_pcd
 
-                    # randomly sample points around previous center
-                    sampled_pts = np.random.normal(loc=end_cap_center, scale=0.005, size=(100, 3))
+                    # randomly sample points around previous end cap center
+                    sampled_pts = np.random.normal(loc=end_cap_pos, scale=0.005, size=(100, 3))
                     sampled_pcd = o3d.geometry.PointCloud()
                     sampled_pcd.points = o3d.utility.Vector3dVector(sampled_pts)
                     sampled_pcd.paint_uniform_color(np.array(Tracker.ColorDict[color]) / 255)
                     obs_pcd += sampled_pcd
-                else:  # no point exists
-                    end_cap_center = self.end_cap_centers[end_cap_name][-1].copy() # reuse the previous end cap center
-                    self.end_cap_centers[end_cap_name].append(end_cap_center)
-
-                    # randomly sample points around previous center
-                    sampled_pts = np.random.normal(loc=end_cap_center, scale=0.005, size=(100, 3))
+                else:  # no point exists, randomly sample points around previous end cap center
+                    sampled_pts = np.random.normal(loc=end_cap_pos, scale=0.005, size=(100, 3))
                     sampled_pcd = o3d.geometry.PointCloud()
                     sampled_pcd.points = o3d.utility.Vector3dVector(sampled_pts)
                     sampled_pcd.paint_uniform_color(np.array(Tracker.ColorDict[color]) / 255)
                     obs_pcd += sampled_pcd
-                end_cap_centers.append(end_cap_center)
 
             rod_pcd = copy.deepcopy(self.rod_pcd)
             rod_pcd = rod_pcd.paint_uniform_color(np.array(Tracker.ColorDict[color]) / 255)
-            prev_pose = self.pose_results[color][-1].copy()
-            rod_pose = self.pose_results[color][-1]  # initialize with previous rod_pose
 
-            icp_result = utils.icp(rod_pcd, obs_pcd, max_iter=30, init=rod_pose)
+            icp_result = utils.icp(rod_pcd, obs_pcd, max_iter=30, init=prev_pose)
             if icp_result.fitness > 0.7:
-                rod_pose = icp_result.transformation
+                curr_pose = icp_result.transformation
 
-            if la.norm(rod_pose[:3, 3] - prev_pose[:3, 3]) > 0.05:
-                rod_pose = prev_pose.copy()
+            if la.norm(curr_pose[:3, 3] - prev_pose[:3, 3]) > 0.05:
+                curr_pose = prev_pose.copy()
 
-            rod_pcd.transform(rod_pose)
-            self.pose_results[color].append(rod_pose)
+            rod_pcd.transform(curr_pose)
+            self.pose_results[color].append(curr_pose)
             reconstructed_rods += rod_pcd
 
             vis_list.append(obs_pcd)

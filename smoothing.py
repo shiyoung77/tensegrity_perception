@@ -4,7 +4,6 @@ import importlib
 
 from tqdm.contrib import tenumerate
 import numpy as np
-import quaternion
 import open3d as o3d
 
 
@@ -41,7 +40,7 @@ if __name__ == '__main__':
 
     rod_mesh_file = 'pcd/yale/untethered_rod_w_end_cap.ply'
     rod_mesh = o3d.io.read_triangle_mesh(rod_mesh_file)
-    rod_pcd = rod_mesh.sample_points_poisson_disk(5000)
+    rod_pcd = rod_mesh.sample_points_poisson_disk(3000)
     points = np.asarray(rod_pcd.points)
     offset = points.mean(0)
     points -= offset  # move point cloud center
