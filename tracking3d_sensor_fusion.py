@@ -38,6 +38,7 @@ class Tracker:
         for node, color in enumerate(self.data_cfg['node_to_color']):
             self.G.add_node(node) 
             self.G.nodes[node]['color'] = color
+            self.G.nodes[node]['pos_list'] = []
 
         # add tendon edge to graph
         for sensor_id, (u, v) in self.data_cfg['sensor_to_tendon'].items():
@@ -185,17 +186,23 @@ class Tracker:
             rod_pcd = rod_pcd.paint_uniform_color(np.array(Tracker.ColorDict[color]) / 255)
             icp_result = utils.icp(rod_pcd, obs_pcd, max_iter=30, init=init_pose)
             print(f"init icp fitness ({color}):", icp_result.fitness)
-            rod_pcd.transform(icp_result.transformation)
+            rod_pose = icp_result.transformation
+            rod_pcd.transform(rod_pose)
             reconstructed_rods += rod_pcd
-            self.G.edges[u, v]['pose_list'].append(icp_result.transformation)
+            self.G.edges[u, v]['pose_list'].append(rod_pose)
+            self.G.nodes[u]['pos_list'].append(rod_pose[:3, 3] - rod_pose[:3, 2] * self.rod_length / 2)
+            self.G.nodes[v]['pos_list'].append(rod_pose[:3, 3] + rod_pose[:3, 2] * self.rod_length / 2)
 
         if visualize:
             o3d.visualization.draw_geometries([scene_pcd, reconstructed_rods])
         
         self.initialized = True
 
-
     def update(self, color_im, depth_im, info, visualizer=None):
+        self.track_with_rgbd(color_im, depth_im, visualizer)
+        self.constrained_optimization(info)
+
+    def track_with_rgbd(self, color_im, depth_im, visualizer=None):
         assert self.initialized, "[Error] You must first initialize the tracker!"
         color_im_vis = cv2.cvtColor(color_im, cv2.COLOR_RGB2BGR)
         color_im_hsv = cv2.cvtColor(color_im, cv2.COLOR_RGB2HSV)        
@@ -214,8 +221,8 @@ class Tracker:
             obs_pcd = o3d.geometry.PointCloud()
             prev_pose = self.G.edges[u, v]['pose_list'][-1].copy()
 
-            for i in range(2):
-                prev_end_cap_pos = prev_pose[:3, 3] + (-1)**(i + 1) * prev_pose[:3, 2] * self.rod_length / 2
+            for node in (u, v):
+                prev_end_cap_pos = self.G.nodes[node]['pos_list'][-1]
                 points = np.asarray(scene_pcd_hsv.points)
                 dist = la.norm(points - prev_end_cap_pos[None], axis=1)
                 valid_indices = np.where(dist < 0.04)[0]
@@ -230,7 +237,7 @@ class Tracker:
                 else:
                     valid_indices = np.where(mask1 & mask2)[0]
 
-                # ICP refinement
+                # get point cloud for ICP refinement
                 if len(valid_indices) > 50:  # There are enough points for ICP
                     end_cap_pcd = cropped_cloud.select_by_index(valid_indices)
                     end_cap_pcd.paint_uniform_color(np.array(Tracker.ColorDict[color]) / 255)
@@ -264,6 +271,8 @@ class Tracker:
                 curr_pose = prev_pose.copy()
 
             self.G.edges[u, v]['pose_list'].append(curr_pose)
+            self.G.nodes[u]['pos_list'].append(curr_pose[:3, 3] - curr_pose[:3, 2] * self.rod_length / 2)
+            self.G.nodes[v]['pos_list'].append(curr_pose[:3, 3] + curr_pose[:3, 2] * self.rod_length / 2)
 
             rod_pcd.transform(curr_pose)
             reconstructed_rods += rod_pcd
@@ -295,6 +304,9 @@ class Tracker:
 
         cv2.imshow("observation", color_im_vis)
         cv2.waitKey(1)
+
+    def constrained_optimization(self, info):
+        pass
 
     def estimate_rod_pose_from_end_cap_centers(self, end_cap_centers):
         pos = (end_cap_centers[0] + end_cap_centers[1]) / 2
@@ -351,12 +363,16 @@ if __name__ == '__main__':
         # pprint.pprint(info)
 
         tracker.update(color_im, depth_im, info, visualizer=visualizer)
-        o3d.io.write_point_cloud(os.path.join(dataset, video_id, "scene_cloud", f"{idx:04d}.ply"), tracker.scene_pcd)
-        o3d.io.write_point_cloud(os.path.join(dataset, video_id, "estimation_cloud", f"{idx:04d}.ply"), tracker.estimation_cloud)
-        visualizer.capture_screen_image(os.path.join(dataset, video_id, "raw_estimation", f"{idx:04d}.png"))
+        # o3d.io.write_point_cloud(os.path.join(dataset, video_id, "scene_cloud", f"{idx:04d}.ply"), tracker.scene_pcd)
+        # o3d.io.write_point_cloud(os.path.join(dataset, video_id, "estimation_cloud", f"{idx:04d}.ply"), tracker.estimation_cloud)
+        # visualizer.capture_screen_image(os.path.join(dataset, video_id, "raw_estimation", f"{idx:04d}.png"))
 
-    # pose_output_folder = os.path.join(dataset, video_id, "poses")
-    # os.makedirs(pose_output_folder, exist_ok=True)
-    # for color in tracker.data_cfg['end_cap_colors']:
-    #     poses = np.array(tracker.pose_results[color])
-    #     np.save(os.path.join(pose_output_folder, f'{color}.npy'), poses)
+    exit(0)
+
+    # save rod poses and end cap positions to file
+    pose_output_folder = os.path.join(dataset, video_id, "poses")
+    os.makedirs(pose_output_folder, exist_ok=True)
+    for color, (u, v) in tracker.data_cfg['color_to_rod'].items():
+        np.save(os.path.join(pose_output_folder, f'{color}.npy'), np.array(tracker.G.edges[u, v]['pose_list']))
+        np.save(os.path.join(pose_output_folder, f'{u}_pos.npy'), np.array(tracker.G.nodes[u]['pos_list']))
+        np.save(os.path.join(pose_output_folder, f'{v}_pos.npy'), np.array(tracker.G.nodes[v]['pos_list']))
