@@ -306,7 +306,44 @@ class Tracker:
         cv2.waitKey(1)
 
     def constrained_optimization(self, info):
-        pass
+        rod_length = self.data_cfg['rod_length']
+        num_end_caps = 2 * self.data_cfg['num_rods']  # a rod has two end caps
+
+        obj_func = self.objective_function_generator(balance_factor=0.5)
+
+        init_values = np.zeros(3 * num_end_caps)
+        for i in range(num_end_caps):
+            init_values[(3*i):(3*i + 3)] = self.G.nodes[i]['pos_list'][-1]
+
+        rod_constraints = dict()
+        for color, (u, v) in self.data_cfg['color_to_rod'].items():
+            constraint = dict()
+            constraint['type'] = 'eq'
+            constraint['fun'] = lambda x: la.norm(x[(3*u):(3*u + 3)] - x[(3*v):(3*v + 3)]) - rod_length
+            rod_constraints[color] = constraint
+        rod_constraints = tuple(rod_constraints.values())
+
+        res = minimize(obj_func, init_values, method='SLSQP')
+
+        for i in range(num_end_caps):
+            self.G.nodes[i]['pos_list'][-1] = res.x[(3*i):(3*i + 3)].copy()
+    
+    def objective_function_generator(self, balance_factor=0.5):
+        def objective_function(X):
+            unary_loss = 0
+            for i in range(len(self.data_cfg['node_to_color'])):
+                pos = X[(3*i):(3*i + 3)]
+                estimated_pos = self.G.nodes[i]['pos_list'][-1]
+                unary_loss += la.norm(pos - estimated_pos)**2
+            binary_loss = 0
+            for sensor_id, (u, v) in data_cfg['sensor_to_tendon'].items():
+                u_pos = X[(3*u):(3*u + 3)]
+                v_pos = X[(3*v):(3*v + 3)]
+                estimated_length = la.norm(u_pos - v_pos)
+                measured_length = info['sensors'][str(sensor_id)]['length'] / 100
+                binary_loss += (estimated_length - measured_length)**2
+            return balance_factor * unary_loss + (1 - balance_factor) * binary_loss
+        return objective_function
 
     def estimate_rod_pose_from_end_cap_centers(self, end_cap_centers):
         pos = (end_cap_centers[0] + end_cap_centers[1]) / 2
@@ -351,7 +388,7 @@ if __name__ == '__main__':
 
     visualizer = o3d.visualization.Visualizer()
     visualizer.create_window(width=data_cfg['im_w'], height=data_cfg['im_h'])
-    for idx, prefix in tenumerate(prefixes[1:]):
+    for idx, prefix in tenumerate(prefixes[1:200]):
         color_path = os.path.join(dataset, video_id, 'color', f'{prefix}.png')
         depth_path = os.path.join(dataset, video_id, 'depth', f'{prefix}.png')
         info_path = os.path.join(dataset, video_id, 'data', f'{prefix}.json')
@@ -360,14 +397,11 @@ if __name__ == '__main__':
         depth_im = cv2.imread(depth_path, cv2.IMREAD_UNCHANGED).astype(np.float32) / data_cfg['depth_scale']
         with open(info_path, 'r') as f:
             info = json.load(f)
-        # pprint.pprint(info)
 
         tracker.update(color_im, depth_im, info, visualizer=visualizer)
         # o3d.io.write_point_cloud(os.path.join(dataset, video_id, "scene_cloud", f"{idx:04d}.ply"), tracker.scene_pcd)
         # o3d.io.write_point_cloud(os.path.join(dataset, video_id, "estimation_cloud", f"{idx:04d}.ply"), tracker.estimation_cloud)
         # visualizer.capture_screen_image(os.path.join(dataset, video_id, "raw_estimation", f"{idx:04d}.png"))
-
-    exit(0)
 
     # save rod poses and end cap positions to file
     pose_output_folder = os.path.join(dataset, video_id, "poses")
