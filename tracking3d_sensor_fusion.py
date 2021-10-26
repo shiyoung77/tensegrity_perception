@@ -318,15 +318,19 @@ class Tracker:
         for i in range(num_end_caps):
             init_values[(3*i):(3*i + 3)] = self.G.nodes[i]['pos_list'][-1]
 
-        rod_constraints = dict()
-        for color, (u, v) in self.data_cfg['color_to_rod'].items():
+        # be VERY CAREFUL when generating a lambda function in a for loop
+        # https://stackoverflow.com/questions/45491376/
+        # https://docs.python-guide.org/writing/gotchas/#late-binding-closures
+        rod_constraints = []
+        for _, (u, v) in self.data_cfg['color_to_rod'].items():
             constraint = dict()
             constraint['type'] = 'eq'
-            constraint['fun'] = lambda x: la.norm(x[(3*u):(3*u + 3)] - x[(3*v):(3*v + 3)]) - rod_length
-            rod_constraints[color] = constraint
-        rod_constraints = tuple(rod_constraints.values())
+            constraint['fun'] = self.constraint_function_generator(u, v, rod_length)
+            rod_constraints.append(constraint)
 
+        # res = minimize(obj_func, init_values, method='SLSQP', constraints=[])
         res = minimize(obj_func, init_values, method='SLSQP', constraints=rod_constraints)
+        assert res.success, "Optimization fail! Something must be wrong."
 
         for i in range(num_end_caps):
             self.G.nodes[i]['pos_list'][-1] = res.x[(3*i):(3*i + 3)].copy()
@@ -338,6 +342,11 @@ class Tracker:
             curr_end_cap_centers = np.vstack([u_pos, v_pos])
             optimized_pose = self.estimate_rod_pose_from_end_cap_centers(curr_end_cap_centers, prev_rod_pose)
             self.G.edges[u, v]['pose_list'][-1] = optimized_pose
+    
+    def constraint_function_generator(self, u, v, rod_length):
+        def constraint_function(X):
+            return la.norm(X[(3*u):(3*u + 3)] - X[(3*v):(3*v + 3)]) - rod_length
+        return constraint_function
     
     def objective_function_generator(self, sensor_measurement, balance_factor=0.5):
         def objective_function(X):
@@ -367,7 +376,7 @@ class Tracker:
         prev_rot = prev_rod_pose[:3, :3].copy()
         prev_z_dir = prev_rot[:, 2].copy()
 
-        # https://math.stackexchange.com/questions/180418/calculate-rotation-matrix-to-align-vector-a-to-vector-b-in-3d
+        # https://math.stackexchange.com/questions/180418/
         delta_rot = utils.np_rotmat_of_two_v(v1=prev_z_dir, v2=curr_z_dir)
         curr_rod_pose = np.eye(4)
         curr_rod_pose[:3, :3] = delta_rot @ prev_rot
@@ -430,7 +439,7 @@ if __name__ == '__main__':
         tracker.update(color_im, depth_im, info, visualizer=visualizer)
         # o3d.io.write_point_cloud(os.path.join(dataset, video_id, "scene_cloud", f"{idx:04d}.ply"), tracker.scene_pcd)
         # o3d.io.write_point_cloud(os.path.join(dataset, video_id, "estimation_cloud", f"{idx:04d}.ply"), tracker.estimation_cloud)
-        visualizer.capture_screen_image(os.path.join(dataset, video_id, "raw_estimation", f"{idx:04d}.png"))
+        # visualizer.capture_screen_image(os.path.join(dataset, video_id, "raw_estimation", f"{idx:04d}.png"))
 
     # save rod poses and end cap positions to file
     pose_output_folder = os.path.join(dataset, video_id, "poses")
