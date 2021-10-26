@@ -326,7 +326,7 @@ class Tracker:
             rod_constraints[color] = constraint
         rod_constraints = tuple(rod_constraints.values())
 
-        res = minimize(obj_func, init_values, method='SLSQP')
+        res = minimize(obj_func, init_values, method='SLSQP', constraints=rod_constraints)
 
         for i in range(num_end_caps):
             self.G.nodes[i]['pos_list'][-1] = res.x[(3*i):(3*i + 3)].copy()
