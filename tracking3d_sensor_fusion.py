@@ -199,10 +199,6 @@ class Tracker:
         self.initialized = True
 
     def update(self, color_im, depth_im, info, visualizer=None):
-        self.track_with_rgbd(color_im, depth_im, visualizer)
-        self.constrained_optimization(info)
-
-    def track_with_rgbd(self, color_im, depth_im, visualizer=None):
         assert self.initialized, "[Error] You must first initialize the tracker!"
         color_im_vis = cv2.cvtColor(color_im, cv2.COLOR_RGB2BGR)
         color_im_hsv = cv2.cvtColor(color_im, cv2.COLOR_RGB2HSV)        
@@ -214,19 +210,57 @@ class Tracker:
                                      cam_extr=self.data_cfg['cam_extr'])
         self.scene_pcd = scene_pcd
 
-        vis_list = [scene_pcd]
-        reconstructed_rods = o3d.geometry.PointCloud()
+        self.track_with_rgbd(scene_pcd_hsv)
+        self.constrained_optimization(info)
 
+        if visualizer is not None:
+            visualizer.clear_geometries()
+            visualizer.add_geometry(scene_pcd)
+            for color, (u, v) in self.data_cfg['color_to_rod'].items():
+                rod_pcd = copy.deepcopy(self.rod_pcd)
+                rod_pcd = rod_pcd.paint_uniform_color(np.array(Tracker.ColorDict[color]) / 255)
+                rod_pose = self.G.edges[u, v]['pose_list'][-1]
+                rod_pcd.transform(rod_pose)
+                visualizer.add_geometry(rod_pcd)
+
+            # Due to a potential bug in Open3D, cx, cy can only be w / 2 - 0.5, h / 2 - 0.5
+            # https://github.com/intel-isl/Open3D/issues/1164
+            cam_intr_vis = o3d.camera.PinholeCameraIntrinsic()
+            cam_intr = np.array(self.data_cfg['cam_intr'])
+            fx, fy = cam_intr[0, 0], cam_intr[1, 1]
+            cx, cy = self.data_cfg['im_w'] / 2 - 0.5, self.data_cfg['im_h'] / 2 - 0.5
+            cam_intr_vis.set_intrinsics(self.data_cfg['im_w'], self.data_cfg['im_h'], fx, fy, cx, cy)
+            cam_params = o3d.camera.PinholeCameraParameters()
+            cam_params.intrinsic = cam_intr_vis
+            cam_params.extrinsic = self.data_cfg['cam_extr']
+
+            visualizer.get_view_control().convert_from_pinhole_camera_parameters(cam_params)
+            visualizer.poll_events()
+            visualizer.update_renderer()
+
+        cv2.imshow("observation", color_im_vis)
+        if cv2.waitKey(1) == ord('q'):
+            exit(0)
+
+    def track_with_rgbd(self, scene_pcd_hsv):
         for color, (u, v) in self.data_cfg['color_to_rod'].items():
             obs_pcd = o3d.geometry.PointCloud()
             prev_pose = self.G.edges[u, v]['pose_list'][-1].copy()
 
             for node in (u, v):
                 prev_end_cap_pos = self.G.nodes[node]['pos_list'][-1]
-                points = np.asarray(scene_pcd_hsv.points)
-                dist = la.norm(points - prev_end_cap_pos[None], axis=1)
-                valid_indices = np.where(dist < 0.04)[0]
-                cropped_cloud = scene_pcd_hsv.select_by_index(valid_indices)
+
+                # points = np.asarray(scene_pcd_hsv.points)
+                # dist = la.norm(points - prev_end_cap_pos[None], axis=1)
+                # valid_indices = np.where(dist < 0.04)[0]
+                # cropped_cloud = scene_pcd_hsv.select_by_index(valid_indices)
+
+                half_length = 0.04
+                lowerbound = prev_end_cap_pos - half_length
+                upperbound = prev_end_cap_pos + half_length
+                end_cap_bbox = o3d.geometry.AxisAlignedBoundingBox(lowerbound, upperbound)
+                cropped_cloud = scene_pcd_hsv.crop(end_cap_bbox)
+
                 points_hsv = np.asarray(cropped_cloud.colors) * 255
                 mask1 = np.all((points_hsv - self.data_cfg['hsv_ranges'][color][0]) > 0, axis=1)
                 mask2 = np.all((points_hsv - self.data_cfg['hsv_ranges'][color][1]) < 0, axis=1)
@@ -264,52 +298,21 @@ class Tracker:
             rod_pcd = rod_pcd.paint_uniform_color(np.array(Tracker.ColorDict[color]) / 255)
 
             icp_result = utils.icp(rod_pcd, obs_pcd, max_iter=30, init=prev_pose)
-            if icp_result.fitness > 0.7:
+            if icp_result.fitness > 0.7 and la.norm(icp_result.transformation[:3, 3] - prev_pose[:3, 3]) < 0.05:
                 curr_pose = icp_result.transformation
-
-            if la.norm(curr_pose[:3, 3] - prev_pose[:3, 3]) > 0.05:
+            else:
                 curr_pose = prev_pose.copy()
 
             self.G.edges[u, v]['pose_list'].append(curr_pose)
             self.G.nodes[u]['pos_list'].append(curr_pose[:3, 3] - curr_pose[:3, 2] * self.rod_length / 2)
             self.G.nodes[v]['pos_list'].append(curr_pose[:3, 3] + curr_pose[:3, 2] * self.rod_length / 2)
 
-            rod_pcd.transform(curr_pose)
-            reconstructed_rods += rod_pcd
-
-            vis_list.append(obs_pcd)
-            vis_list.append(reconstructed_rods)
-
-            self.estimation_cloud = scene_pcd + reconstructed_rods
-
-        if visualizer is not None:
-            visualizer.clear_geometries()
-            for geometry in vis_list:
-                visualizer.add_geometry(geometry)
-
-            # Due to a potential bug in Open3D, cx, cy can only be w / 2 - 0.5, h / 2 - 0.5
-            # https://github.com/intel-isl/Open3D/issues/1164
-            cam_intr_vis = o3d.camera.PinholeCameraIntrinsic()
-            cam_intr = np.array(self.data_cfg['cam_intr'])
-            fx, fy = cam_intr[0, 0], cam_intr[1, 1]
-            cx, cy = self.data_cfg['im_w'] / 2 - 0.5, self.data_cfg['im_h'] / 2 - 0.5
-            cam_intr_vis.set_intrinsics(self.data_cfg['im_w'], self.data_cfg['im_h'], fx, fy, cx, cy)
-            cam_params = o3d.camera.PinholeCameraParameters()
-            cam_params.intrinsic = cam_intr_vis
-            cam_params.extrinsic = self.data_cfg['cam_extr']
-
-            visualizer.get_view_control().convert_from_pinhole_camera_parameters(cam_params)
-            visualizer.poll_events()
-            visualizer.update_renderer()
-
-        cv2.imshow("observation", color_im_vis)
-        cv2.waitKey(1)
-
     def constrained_optimization(self, info):
         rod_length = self.data_cfg['rod_length']
         num_end_caps = 2 * self.data_cfg['num_rods']  # a rod has two end caps
 
-        obj_func = self.objective_function_generator(balance_factor=0.5)
+        sensor_measurement = info['sensors']
+        obj_func = self.objective_function_generator(sensor_measurement, balance_factor=0.5)
 
         init_values = np.zeros(3 * num_end_caps)
         for i in range(num_end_caps):
@@ -327,8 +330,16 @@ class Tracker:
 
         for i in range(num_end_caps):
             self.G.nodes[i]['pos_list'][-1] = res.x[(3*i):(3*i + 3)].copy()
+        
+        for color, (u, v) in self.data_cfg['color_to_rod'].items():
+            prev_rod_pose = self.G.edges[u, v]['pose_list'][-1]
+            u_pos = self.G.nodes[u]['pos_list'][-1]
+            v_pos = self.G.nodes[v]['pos_list'][-1]
+            curr_end_cap_centers = np.vstack([u_pos, v_pos])
+            optimized_pose = self.estimate_rod_pose_from_end_cap_centers(curr_end_cap_centers, prev_rod_pose)
+            self.G.edges[u, v]['pose_list'][-1] = optimized_pose
     
-    def objective_function_generator(self, balance_factor=0.5):
+    def objective_function_generator(self, sensor_measurement, balance_factor=0.5):
         def objective_function(X):
             unary_loss = 0
             for i in range(len(self.data_cfg['node_to_color'])):
@@ -340,26 +351,44 @@ class Tracker:
                 u_pos = X[(3*u):(3*u + 3)]
                 v_pos = X[(3*v):(3*v + 3)]
                 estimated_length = la.norm(u_pos - v_pos)
-                measured_length = info['sensors'][str(sensor_id)]['length'] / 100
+                measured_length = sensor_measurement[str(sensor_id)]['length'] / 100
                 binary_loss += (estimated_length - measured_length)**2
             return balance_factor * unary_loss + (1 - balance_factor) * binary_loss
         return objective_function
 
-    def estimate_rod_pose_from_end_cap_centers(self, end_cap_centers):
-        pos = (end_cap_centers[0] + end_cap_centers[1]) / 2
-        z_dir = end_cap_centers[1] - end_cap_centers[0]
-        z_dir /= la.norm(z_dir)
-        x_dir = np.array([-z_dir[2], 0, z_dir[0]])
-        x_dir /= la.norm(x_dir)
-        y_dir = np.cross(z_dir, x_dir)
-        y_dir /= la.norm(y_dir)
+    def estimate_rod_pose_from_end_cap_centers(self, curr_end_cap_centers, prev_rod_pose=None):
+        curr_rod_pos = (curr_end_cap_centers[0] + curr_end_cap_centers[1]) / 2
+        curr_z_dir = curr_end_cap_centers[1] - curr_end_cap_centers[0]
+        curr_z_dir /= la.norm(curr_z_dir)
 
-        pose = np.eye(4)
-        pose[:3, 0] = x_dir
-        pose[:3, 1] = y_dir
-        pose[:3, 2] = z_dir
-        pose[:3, 3] = pos
-        return pose
+        if prev_rod_pose is None:
+            prev_rod_pose = np.eye(4)
+        
+        prev_rot = prev_rod_pose[:3, :3].copy()
+        prev_z_dir = prev_rot[:, 2].copy()
+
+        # https://math.stackexchange.com/questions/180418/calculate-rotation-matrix-to-align-vector-a-to-vector-b-in-3d
+        delta_rot = utils.np_rotmat_of_two_v(v1=prev_z_dir, v2=curr_z_dir)
+        curr_rod_pose = np.eye(4)
+        curr_rod_pose[:3, :3] = delta_rot @ prev_rot
+        curr_rod_pose[:3, 3] = curr_rod_pos
+        return curr_rod_pose
+
+    # def estimate_rod_pose_from_end_cap_centers(self, end_cap_centers):
+    #     pos = (end_cap_centers[0] + end_cap_centers[1]) / 2
+    #     z_dir = end_cap_centers[1] - end_cap_centers[0]
+    #     z_dir /= la.norm(z_dir)
+    #     x_dir = np.array([-z_dir[2], 0, z_dir[0]])
+    #     x_dir /= la.norm(x_dir)
+    #     y_dir = np.cross(z_dir, x_dir)
+    #     y_dir /= la.norm(y_dir)
+
+    #     pose = np.eye(4)
+    #     pose[:3, 0] = x_dir
+    #     pose[:3, 1] = y_dir
+    #     pose[:3, 2] = z_dir
+    #     pose[:3, 3] = pos
+    #     return pose
 
 
 if __name__ == '__main__':
@@ -388,7 +417,7 @@ if __name__ == '__main__':
 
     visualizer = o3d.visualization.Visualizer()
     visualizer.create_window(width=data_cfg['im_w'], height=data_cfg['im_h'])
-    for idx, prefix in tenumerate(prefixes[1:200]):
+    for idx, prefix in tenumerate(prefixes[1:]):
         color_path = os.path.join(dataset, video_id, 'color', f'{prefix}.png')
         depth_path = os.path.join(dataset, video_id, 'depth', f'{prefix}.png')
         info_path = os.path.join(dataset, video_id, 'data', f'{prefix}.json')
@@ -401,7 +430,7 @@ if __name__ == '__main__':
         tracker.update(color_im, depth_im, info, visualizer=visualizer)
         # o3d.io.write_point_cloud(os.path.join(dataset, video_id, "scene_cloud", f"{idx:04d}.ply"), tracker.scene_pcd)
         # o3d.io.write_point_cloud(os.path.join(dataset, video_id, "estimation_cloud", f"{idx:04d}.ply"), tracker.estimation_cloud)
-        # visualizer.capture_screen_image(os.path.join(dataset, video_id, "raw_estimation", f"{idx:04d}.png"))
+        visualizer.capture_screen_image(os.path.join(dataset, video_id, "raw_estimation", f"{idx:04d}.png"))
 
     # save rod poses and end cap positions to file
     pose_output_folder = os.path.join(dataset, video_id, "poses")
