@@ -28,7 +28,8 @@ print(res)
 
 if __name__ == '__main__':
     dataset = 'dataset'
-    video_id = "crawling_trial4"
+    # video_id = "crawling_trial4"
+    video_id = "crawling_sim"
     prefixes = sorted([i.split('.')[0] for i in os.listdir(os.path.join(dataset, video_id, 'color'))])
 
     data_cfg_module = importlib.import_module(f'{dataset}.{video_id}.config')
