@@ -14,6 +14,7 @@ from scipy import linalg as la
 from scipy.optimize import minimize
 from matplotlib import pyplot as plt
 from tqdm.contrib import tenumerate
+from tqdm import tqdm
 
 import utils
 
@@ -29,6 +30,8 @@ class Tracker:
         self.data_cfg = data_cfg
         pprint.pprint(self.data_cfg)
         self.initialized = False
+
+        self.rod_length = self.data_cfg['rod_length']
 
         # initialize graph
         self.G = nx.Graph()
@@ -64,21 +67,23 @@ class Tracker:
         points /= self.data_cfg['rod_scale']  # scale points from millimeter to meter
 
         # visualize rod and end caps
-        init_rod_pose = np.eye(4)
-        self.rod_length = self.data_cfg['rod_length']
-        rod_frame = utils.generate_coordinate_frame(init_rod_pose)
-        end_cap_pose_1 = init_rod_pose.copy()
-        end_cap_pose_1[:3, 3] += end_cap_pose_1[:3, 2] * self.rod_length / 2
-        end_cap_frame_1 = utils.generate_coordinate_frame(end_cap_pose_1)
-        end_cap_pose_2 = init_rod_pose.copy()
-        end_cap_pose_2[:3, 3] -= end_cap_pose_2[:3, 2] * self.rod_length / 2
-        end_cap_frame_2 = utils.generate_coordinate_frame(end_cap_pose_2)
-        o3d.visualization.draw_geometries([self.rod_pcd, rod_frame, end_cap_frame_1, end_cap_frame_2])
+        # init_rod_pose = np.eye(4)
+        # rod_frame = utils.generate_coordinate_frame(init_rod_pose)
+        # end_cap_pose_1 = init_rod_pose.copy()
+        # end_cap_pose_1[:3, 3] += end_cap_pose_1[:3, 2] * self.rod_length / 2
+        # end_cap_frame_1 = utils.generate_coordinate_frame(end_cap_pose_1)
+        # end_cap_pose_2 = init_rod_pose.copy()
+        # end_cap_pose_2[:3, 3] -= end_cap_pose_2[:3, 2] * self.rod_length / 2
+        # end_cap_frame_2 = utils.generate_coordinate_frame(end_cap_pose_2)
+        # o3d.visualization.draw_geometries([self.rod_pcd, rod_frame, end_cap_frame_1, end_cap_frame_2])
 
-    def initialize(self, color_im: np.ndarray, depth_im: np.ndarray, visualize: bool = True, compute_hsv: bool = True):
+    def initialize(self, color_im: np.ndarray, depth_im: np.ndarray, info: dict,
+                   visualize: bool = True, compute_hsv: bool = True):
+
         scene_pcd = utils.create_pcd(depth_im, self.data_cfg['cam_intr'], color_im,
                                      depth_trunc=self.data_cfg['depth_trunc'])
         o3d.visualization.draw_geometries([scene_pcd])
+
         if 'cam_extr' not in self.data_cfg:
             plane_frame, _ = utils.plane_detection_ransac(scene_pcd, inlier_thresh=0.005, visualize=visualize)
             self.data_cfg['cam_extr'] = np.round(plane_frame, decimals=3)
@@ -92,7 +97,7 @@ class Tracker:
                 window_name = f'Select #{u} end cap ({color})'
                 end_cap_roi = cv2.selectROI(window_name, color_im_bgr, fromCenter=False, showCrosshair=False)
                 cv2.destroyWindow(window_name)
-                end_cap_rois[u] = end_cap_roi
+                end_cap_rois[str(u)] = end_cap_roi
             self.data_cfg['init_end_cap_rois'] = end_cap_rois
 
         # visualize init bboxes
@@ -136,7 +141,7 @@ class Tracker:
                     plt.show()
 
         # estimate init rod transformation
-        reconstructed_rods = o3d.geometry.PointCloud()
+        complete_obs_pcd = o3d.geometry.PointCloud()
         for color, (u, v) in self.data_cfg['color_to_rod'].items():
             end_cap_centers = []
             obs_pcd = o3d.geometry.PointCloud()
@@ -157,12 +162,12 @@ class Tracker:
 
                 # filter end_cap_pcd by HSV
                 points_hsv = np.asarray(end_cap_pcd.colors) * 255
-                mask1 = np.all((points_hsv - self.data_cfg['hsv_ranges'][color][0]) > 0, axis=1)
-                mask2 = np.all((points_hsv - self.data_cfg['hsv_ranges'][color][1]) < 0, axis=1)
+                mask1 = np.all((points_hsv - self.data_cfg['hsv_ranges'][color][0]) >= 0, axis=1)
+                mask2 = np.all((points_hsv - self.data_cfg['hsv_ranges'][color][1]) <= 0, axis=1)
 
                 if color == 'red':
-                    mask3 = np.all((points_hsv - np.array([0, 150, 50])) > 0, axis=1)
-                    mask4 = np.all((points_hsv - np.array([20, 255, 255])) < 0, axis=1)
+                    mask3 = np.all((points_hsv - np.array([0, 150, 50])) >= 0, axis=1)
+                    mask4 = np.all((points_hsv - np.array([20, 255, 255])) <= 0, axis=1)
                     valid_indices = np.where((mask1 & mask2) | (mask3 & mask4))[0]
                 else:
                     valid_indices = np.where(mask1 & mask2)[0]
@@ -180,6 +185,8 @@ class Tracker:
                 end_cap_centers.append(end_cap_center)
 
                 obs_pcd += end_cap_pcd
+
+            complete_obs_pcd += obs_pcd
             
             # compute rod pose given end cap centers
             init_pose = self.estimate_rod_pose_from_end_cap_centers(end_cap_centers)
@@ -189,13 +196,24 @@ class Tracker:
             print(f"init icp fitness ({color}):", icp_result.fitness)
             rod_pose = icp_result.transformation
             rod_pcd.transform(rod_pose)
-            reconstructed_rods += rod_pcd
             self.G.edges[u, v]['pose_list'].append(rod_pose)
             self.G.nodes[u]['pos_list'].append(rod_pose[:3, 3] - rod_pose[:3, 2] * self.rod_length / 2)
             self.G.nodes[v]['pos_list'].append(rod_pose[:3, 3] + rod_pose[:3, 2] * self.rod_length / 2)
 
+        self.constrained_optimization(info, balance_factor=0.8)
+
+        robot_cloud = o3d.geometry.PointCloud()
+        for color, (u, v) in self.data_cfg['color_to_rod'].items():
+            rod_pcd = copy.deepcopy(self.rod_pcd)
+            rod_pcd = rod_pcd.paint_uniform_color(np.array(Tracker.ColorDict[color]) / 255)
+            rod_pose = self.G.edges[u, v]['pose_list'][-1]
+            rod_pcd.transform(rod_pose)
+            robot_cloud += rod_pcd
+
+        robot_cloud = self.rigid_finetune(complete_obs_pcd, robot_cloud)
+
         if visualize:
-            o3d.visualization.draw_geometries([scene_pcd, reconstructed_rods])
+            o3d.visualization.draw_geometries([scene_pcd, robot_cloud])
         
         self.initialized = True
 
@@ -210,7 +228,7 @@ class Tracker:
                                      cam_extr=self.data_cfg['cam_extr'])
 
         complete_obs_pcd = self.track_with_rgbd(scene_pcd_hsv)
-        self.constrained_optimization(info, balance_factor=0.5)
+        self.constrained_optimization(info, balance_factor=0.8)
 
         robot_cloud = o3d.geometry.PointCloud()
         for color, (u, v) in self.data_cfg['color_to_rod'].items():
@@ -220,7 +238,7 @@ class Tracker:
             rod_pcd.transform(rod_pose)
             robot_cloud += rod_pcd
 
-        self.rigid_finetune(complete_obs_pcd, robot_cloud)
+        robot_cloud = self.rigid_finetune(complete_obs_pcd, robot_cloud)
         return robot_cloud, scene_pcd
     
     def visualize(self, robot_cloud, scene_pcd, visualizer):
@@ -264,11 +282,11 @@ class Tracker:
                 cropped_cloud = scene_pcd_hsv.crop(end_cap_bbox)
 
                 points_hsv = np.asarray(cropped_cloud.colors) * 255
-                mask1 = np.all((points_hsv - self.data_cfg['hsv_ranges'][color][0]) > 0, axis=1)
-                mask2 = np.all((points_hsv - self.data_cfg['hsv_ranges'][color][1]) < 0, axis=1)
+                mask1 = np.all((points_hsv - self.data_cfg['hsv_ranges'][color][0]) >= 0, axis=1)
+                mask2 = np.all((points_hsv - self.data_cfg['hsv_ranges'][color][1]) <= 0, axis=1)
                 if color == 'red':
-                    mask3 = np.all((points_hsv - np.array([0, 100, 50])) > 0, axis=1)
-                    mask4 = np.all((points_hsv - np.array([20, 255, 255])) < 0, axis=1)
+                    mask3 = np.all((points_hsv - np.array([0, 100, 50])) >= 0, axis=1)
+                    mask4 = np.all((points_hsv - np.array([20, 255, 255])) <= 0, axis=1)
                     valid_indices = np.where((mask1 & mask2) | (mask3 & mask4))[0]
                 else:
                     valid_indices = np.where(mask1 & mask2)[0]
@@ -385,6 +403,9 @@ class Tracker:
             self.G.edges[u, v]['pose_list'][-1] = optimized_pose
             self.G.nodes[u]['pos_list'][-1] = optimized_pose[:3, 3] - optimized_pose[:3, 2] * self.rod_length / 2
             self.G.nodes[v]['pos_list'][-1] = optimized_pose[:3, 3] + optimized_pose[:3, 2] * self.rod_length / 2
+        
+        robot_cloud.transform(delta_transformation)
+        return robot_cloud
     
     def estimate_rod_pose_from_end_cap_centers(self, curr_end_cap_centers, prev_rod_pose=None):
         curr_rod_pos = (curr_end_cap_centers[0] + curr_end_cap_centers[1]) / 2
@@ -424,12 +445,14 @@ class Tracker:
 if __name__ == '__main__':
     parser = ArgumentParser()
     parser.add_argument("--dataset", default="dataset")
-    parser.add_argument("--video_id", default="crawling_trial4")
+    parser.add_argument("--video_id", default="six_cameras10")
     parser.add_argument("--rod_mesh_file", default="pcd/yale/untethered_rod_w_end_cap.ply")
-    parser.add_argument("-v", "--visualize", default=False, action="store_true")
+    parser.add_argument("--first_frame_id", default=0, type=int)
+    parser.add_argument("-v", "--visualize", default=True, action="store_true")
     args = parser.parse_args()
 
-    prefixes = sorted([i.split('.')[0] for i in os.listdir(os.path.join(args.dataset, args.video_id, 'color'))])
+    video_path = os.path.join(args.dataset, args.video_id)
+    prefixes = sorted([i.split('.')[0] for i in os.listdir(os.path.join(video_path, 'color'))])
 
     data_cfg_module = importlib.import_module(f'{args.dataset}.{args.video_id}.config')
     data_cfg = data_cfg_module.get_config(read_cfg=True)
@@ -437,26 +460,30 @@ if __name__ == '__main__':
     tracker = Tracker(data_cfg, rod_mesh_file=args.rod_mesh_file)
 
     # initialize tracker with the first frame    
-    color_path = os.path.join(args.dataset, args.video_id, 'color', f'{prefixes[0]}.png')
-    depth_path = os.path.join(args.dataset, args.video_id, 'depth', f'{prefixes[0]}.png')
+    color_path = os.path.join(video_path, 'color', f'{prefixes[args.first_frame_id]}.png')
+    depth_path = os.path.join(video_path, 'depth', f'{prefixes[args.first_frame_id]}.png')
+    info_path = os.path.join(video_path, 'data', f'{prefixes[args.first_frame_id]}.json')
     color_im = cv2.cvtColor(cv2.imread(color_path), cv2.COLOR_BGR2RGB)
     depth_im = cv2.imread(depth_path, cv2.IMREAD_UNCHANGED).astype(np.float32) / data_cfg['depth_scale']
-    tracker.initialize(color_im, depth_im, visualize=args.visualize, compute_hsv=False)
+    with open(info_path, 'r') as f:
+        info = json.load(f)
+    tracker.initialize(color_im, depth_im, info, visualize=args.visualize, compute_hsv=False)
     data_cfg_module.write_config(tracker.data_cfg)
 
     # track frames
-    os.makedirs(os.path.join(args.dataset, args.video_id, "scene_cloud"), exist_ok=True)
-    os.makedirs(os.path.join(args.dataset, args.video_id, "estimation_cloud"), exist_ok=True)
-    os.makedirs(os.path.join(args.dataset, args.video_id, "raw_estimation"), exist_ok=True)
+    os.makedirs(os.path.join(video_path, "scene_cloud"), exist_ok=True)
+    os.makedirs(os.path.join(video_path, "estimation_cloud"), exist_ok=True)
+    os.makedirs(os.path.join(video_path, "raw_estimation"), exist_ok=True)
 
     if args.visualize:
         visualizer = o3d.visualization.Visualizer()
         visualizer.create_window(width=data_cfg['im_w'], height=data_cfg['im_h'])
 
-    for idx, prefix in tenumerate(prefixes[1:]):
-        color_path = os.path.join(args.dataset, args.video_id, 'color', f'{prefix}.png')
-        depth_path = os.path.join(args.dataset, args.video_id, 'depth', f'{prefix}.png')
-        info_path = os.path.join(args.dataset, args.video_id, 'data', f'{prefix}.json')
+    for idx in tqdm(range(args.first_frame_id + 1, len(prefixes))):
+        prefix = prefixes[idx]
+        color_path = os.path.join(video_path, 'color', f'{prefix}.png')
+        depth_path = os.path.join(video_path, 'depth', f'{prefix}.png')
+        info_path = os.path.join(video_path, 'data', f'{prefix}.json')
 
         color_im_bgr = cv2.imread(color_path)
         color_im = cv2.cvtColor(color_im_bgr, cv2.COLOR_BGR2RGB)
@@ -465,18 +492,18 @@ if __name__ == '__main__':
             info = json.load(f)
 
         robot_cloud, scene_pcd = tracker.update(color_im, depth_im, info)
+        estimation_cloud = robot_cloud + scene_pcd
 
         if args.visualize:
             tracker.visualize(robot_cloud, scene_pcd, visualizer)
             cv2.imshow("observation", color_im_bgr)
             cv2.waitKey(1)
 
-        # o3d.io.write_point_cloud(os.path.join(dataset, video_id, "scene_cloud", f"{idx:04d}.ply"), tracker.scene_pcd)
-        # o3d.io.write_point_cloud(os.path.join(dataset, video_id, "estimation_cloud", f"{idx:04d}.ply"), tracker.estimation_cloud)
-        # visualizer.capture_screen_image(os.path.join(dataset, video_id, "raw_estimation", f"{idx:04d}.png"))
+        o3d.io.write_point_cloud(os.path.join(video_path, "estimation_cloud", f"{idx:04d}.ply"), estimation_cloud)
+        visualizer.capture_screen_image(os.path.join(video_path, "raw_estimation", f"{idx:04d}.png"))
 
     # save rod poses and end cap positions to file
-    pose_output_folder = os.path.join(args.dataset, args.video_id, "poses")
+    pose_output_folder = os.path.join(video_path, "poses")
     os.makedirs(pose_output_folder, exist_ok=True)
     for color, (u, v) in tracker.data_cfg['color_to_rod'].items():
         np.save(os.path.join(pose_output_folder, f'{color}.npy'), np.array(tracker.G.edges[u, v]['pose_list']))
