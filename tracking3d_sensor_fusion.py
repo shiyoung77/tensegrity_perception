@@ -82,19 +82,10 @@ class Tracker:
 
         scene_pcd = perception_utils.create_pcd(depth_im, self.data_cfg['cam_intr'], color_im,
                                      depth_trunc=self.data_cfg['depth_trunc'])
-        o3d.visualization.draw_geometries([scene_pcd])
-
         if 'cam_extr' not in self.data_cfg:
             plane_frame, _ = perception_utils.plane_detection_ransac(scene_pcd, inlier_thresh=0.005, visualize=visualize)
             self.data_cfg['cam_extr'] = np.round(plane_frame, decimals=3)
-        if visualize:
-            plane_frame = self.data_cfg['cam_extr']
-            plane_frame_vis = perception_utils.generate_coordinate_frame(plane_frame, scale=0.05)
-            cam_frame_vis = perception_utils.generate_coordinate_frame(np.eye(4), scale=0.05)
-            o3d.visualization.draw_geometries([cam_frame_vis, plane_frame_vis, scene_pcd])
-
         scene_pcd.transform(la.inv(self.data_cfg['cam_extr']))
-        o3d.visualization.draw_geometries([scene_pcd])
         
         if 'init_end_cap_rois' not in self.data_cfg:
             color_im_bgr = cv2.cvtColor(color_im, cv2.COLOR_RGB2BGR)
