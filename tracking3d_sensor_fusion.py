@@ -16,7 +16,7 @@ from matplotlib import pyplot as plt
 from tqdm.contrib import tenumerate
 from tqdm import tqdm
 
-import utils
+import perception_utils
 
 class Tracker:
 
@@ -60,7 +60,7 @@ class Tracker:
         
         # read rod mesh for ICP
         rod_mesh = o3d.io.read_triangle_mesh(rod_mesh_file)
-        self.rod_pcd = rod_mesh.sample_points_poisson_disk(3000)
+        self.rod_pcd = rod_mesh.sample_points_poisson_disk(6000)
         points = np.asarray(self.rod_pcd.points)
         offset = points.mean(0)
         points -= offset  # move point cloud center
@@ -68,26 +68,33 @@ class Tracker:
 
         # visualize rod and end caps
         # init_rod_pose = np.eye(4)
-        # rod_frame = utils.generate_coordinate_frame(init_rod_pose)
+        # rod_frame = perception_utitls.generate_coordinate_frame(init_rod_pose)
         # end_cap_pose_1 = init_rod_pose.copy()
         # end_cap_pose_1[:3, 3] += end_cap_pose_1[:3, 2] * self.rod_length / 2
-        # end_cap_frame_1 = utils.generate_coordinate_frame(end_cap_pose_1)
+        # end_cap_frame_1 = perception_utitls.generate_coordinate_frame(end_cap_pose_1)
         # end_cap_pose_2 = init_rod_pose.copy()
         # end_cap_pose_2[:3, 3] -= end_cap_pose_2[:3, 2] * self.rod_length / 2
-        # end_cap_frame_2 = utils.generate_coordinate_frame(end_cap_pose_2)
+        # end_cap_frame_2 = perception_utitls.generate_coordinate_frame(end_cap_pose_2)
         # o3d.visualization.draw_geometries([self.rod_pcd, rod_frame, end_cap_frame_1, end_cap_frame_2])
 
     def initialize(self, color_im: np.ndarray, depth_im: np.ndarray, info: dict,
                    visualize: bool = True, compute_hsv: bool = True):
 
-        scene_pcd = utils.create_pcd(depth_im, self.data_cfg['cam_intr'], color_im,
+        scene_pcd = perception_utils.create_pcd(depth_im, self.data_cfg['cam_intr'], color_im,
                                      depth_trunc=self.data_cfg['depth_trunc'])
         o3d.visualization.draw_geometries([scene_pcd])
 
         if 'cam_extr' not in self.data_cfg:
-            plane_frame, _ = utils.plane_detection_ransac(scene_pcd, inlier_thresh=0.005, visualize=visualize)
+            plane_frame, _ = perception_utils.plane_detection_ransac(scene_pcd, inlier_thresh=0.005, visualize=visualize)
             self.data_cfg['cam_extr'] = np.round(plane_frame, decimals=3)
+        if visualize:
+            plane_frame = self.data_cfg['cam_extr']
+            plane_frame_vis = perception_utils.generate_coordinate_frame(plane_frame, scale=0.05)
+            cam_frame_vis = perception_utils.generate_coordinate_frame(np.eye(4), scale=0.05)
+            o3d.visualization.draw_geometries([cam_frame_vis, plane_frame_vis, scene_pcd])
+
         scene_pcd.transform(la.inv(self.data_cfg['cam_extr']))
+        o3d.visualization.draw_geometries([scene_pcd])
         
         if 'init_end_cap_rois' not in self.data_cfg:
             color_im_bgr = cv2.cvtColor(color_im, cv2.COLOR_RGB2BGR)
@@ -143,6 +150,8 @@ class Tracker:
         # estimate init rod transformation
         complete_obs_pcd = o3d.geometry.PointCloud()
         for color, (u, v) in self.data_cfg['color_to_rod'].items():
+            print("color: ", color)
+            print(self.data_cfg['hsv_ranges'][color])
             end_cap_centers = []
             obs_pcd = o3d.geometry.PointCloud()
 
@@ -156,9 +165,8 @@ class Tracker:
                 color_im_hsv = cv2.cvtColor(color_im, cv2.COLOR_RGB2HSV)
                 masked_color_im = np.zeros_like(color_im_hsv)
                 masked_color_im[pt1[1]:pt2[1], pt1[0]:pt2[0]] = color_im_hsv[pt1[1]:pt2[1], pt1[0]:pt2[0]]
-
-                end_cap_pcd = utils.create_pcd(masked_depth_im, self.data_cfg['cam_intr'], masked_color_im,
-                                               cam_extr=self.data_cfg['cam_extr'])
+                end_cap_pcd = perception_utils.create_pcd(masked_depth_im, self.data_cfg['cam_intr'], masked_color_im,
+                                                          cam_extr=self.data_cfg['cam_extr'])
 
                 # filter end_cap_pcd by HSV
                 points_hsv = np.asarray(end_cap_pcd.colors) * 255
@@ -192,7 +200,7 @@ class Tracker:
             init_pose = self.estimate_rod_pose_from_end_cap_centers(end_cap_centers)
             rod_pcd = copy.deepcopy(self.rod_pcd)
             rod_pcd = rod_pcd.paint_uniform_color(np.array(Tracker.ColorDict[color]) / 255)
-            icp_result = utils.icp(rod_pcd, obs_pcd, max_iter=30, init=init_pose)
+            icp_result = perception_utils.icp(rod_pcd, obs_pcd, max_iter=30, init=init_pose)
             print(f"init icp fitness ({color}):", icp_result.fitness)
             rod_pose = icp_result.transformation
             rod_pcd.transform(rod_pose)
@@ -220,12 +228,12 @@ class Tracker:
     def update(self, color_im, depth_im, info):
         assert self.initialized, "[Error] You must first initialize the tracker!"
         color_im_hsv = cv2.cvtColor(color_im, cv2.COLOR_RGB2HSV)        
-        scene_pcd_hsv = utils.create_pcd(depth_im, self.data_cfg['cam_intr'], color_im_hsv,
-                                         depth_trunc=self.data_cfg['depth_trunc'],
-                                         cam_extr=self.data_cfg['cam_extr'])
-        scene_pcd = utils.create_pcd(depth_im, self.data_cfg['cam_intr'], color_im,
-                                     depth_trunc=self.data_cfg['depth_trunc'],
-                                     cam_extr=self.data_cfg['cam_extr'])
+        scene_pcd_hsv = perception_utils.create_pcd(depth_im, self.data_cfg['cam_intr'], color_im_hsv,
+                                                    depth_trunc=self.data_cfg['depth_trunc'],
+                                                    cam_extr=self.data_cfg['cam_extr'])
+        scene_pcd = perception_utils.create_pcd(depth_im, self.data_cfg['cam_intr'], color_im,
+                                                depth_trunc=self.data_cfg['depth_trunc'],
+                                                cam_extr=self.data_cfg['cam_extr'])
 
         complete_obs_pcd = self.track_with_rgbd(scene_pcd_hsv)
         self.constrained_optimization(info, balance_factor=0.8)
@@ -320,7 +328,7 @@ class Tracker:
             rod_pcd = copy.deepcopy(self.rod_pcd)
             rod_pcd = rod_pcd.paint_uniform_color(np.array(Tracker.ColorDict[color]) / 255)
 
-            icp_result = utils.icp(rod_pcd, end_cap_obs_cloud, max_iter=30, init=prev_pose)
+            icp_result = perception_utils.icp(rod_pcd, end_cap_obs_cloud, max_iter=30, init=prev_pose)
             if icp_result.fitness > 0.7 and la.norm(icp_result.transformation[:3, 3] - prev_pose[:3, 3]) < 0.05:
                 curr_pose = icp_result.transformation
             else:
@@ -391,7 +399,7 @@ class Tracker:
         return objective_function
 
     def rigid_finetune(self, obs_cloud, robot_cloud):
-        icp_result = utils.icp(robot_cloud, obs_cloud, max_iter=30, init=np.eye(4))
+        icp_result = perception_utils.icp(robot_cloud, obs_cloud, max_iter=30, init=np.eye(4))
         if icp_result.fitness > 0.7 and la.norm(icp_result.transformation[:3, 3]) < 0.05:
             delta_transformation = icp_result.transformation
         else:
@@ -419,7 +427,7 @@ class Tracker:
         prev_z_dir = prev_rot[:, 2].copy()
 
         # https://math.stackexchange.com/questions/180418/
-        delta_rot = utils.np_rotmat_of_two_v(v1=prev_z_dir, v2=curr_z_dir)
+        delta_rot = perception_utils.np_rotmat_of_two_v(v1=prev_z_dir, v2=curr_z_dir)
         curr_rod_pose = np.eye(4)
         curr_rod_pose[:3, :3] = delta_rot @ prev_rot
         curr_rod_pose[:3, 3] = curr_rod_pos
