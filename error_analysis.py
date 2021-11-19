@@ -22,9 +22,33 @@ def filter(sensors, window_size=10):
         sensors[t] = np.average(sensors[t:t + window_size], axis=0)
     return sensors[:T - window_size + 1]
 
+def plt_error_graph(rod_id, gt, est, window_size, label, unit='m/s'):
+    T = min(len(gt), len(est))
+    gt = gt[:T]
+    est = est[:T]
+    plt_multiple_x(gt, label_y=f'{label} ({unit})', title=f'rod {rod_id} {label} gt',
+                   label=['x', 'y', 'z'],
+                   save_to=save_to)
+    plt_multiple_x(est, label_y=f'{label} ({unit})', title=f'rod {rod_id} {label} est',
+                   label=['x', 'y', 'z'],
+                   save_to=save_to)
+    plt_multiple_x(gt - est, label_y=f'error ({unit})', title=f'rod {rod_id} {label} error',
+                   label=['x', 'y', 'z'],
+                   save_to=save_to)
 
-pose_type = 'smoothed_poses'
-# pose_type = 'poses'
+    smoothed_est = filter(est, window_size=window_size)
+    smoothed_gt = gt[: len(smoothed_est)]
+    plt_multiple_x(smoothed_est, label_y=f'{label} ({unit})', title=f'rod {rod_id} {label} smoothed est',
+                   label=['x', 'y', 'z'],
+                   save_to=save_to)
+    plt_multiple_x(smoothed_gt - smoothed_est, label_y=f'error({unit})', title=f'rod {rod_id} {label} smoothed error',
+                   label=['x', 'y', 'z'],
+                   save_to=save_to)
+
+
+
+# pose_type = 'smoothed_poses'
+pose_type = 'poses'
 pose_folder = f'/home/wang/github/nn_physics_simulation/tensegrity_perception/dataset/crawling_sim/{pose_type}'
 # error_type = 'smoothed_errors'
 error_type = 'errors'
@@ -59,14 +83,15 @@ gt_rods_quaternion = down_sample(RodState.get_quat(trajectory.rod_state_list), s
 
 # 3 bars
 delta_t = 0.04
-window_size = 1
+window_size = 10
 for rod_id, color in enumerate(['green', 'red', 'blue']):
     pose_file = os.path.join(pose_folder, f'{color}.npy')
     estimated_rod_pos = np.load(pose_file)
-    T = len(estimated_rod_pos)
-    rod_positions = estimated_rod_pos[:T, 0:3, 3]
-    rod_rot_mats = estimated_rod_pos[:T, 0:3, 0:3]
-    rod_lin_vel = (rod_positions[1:] - rod_positions[:-1]) / delta_t
+    rod_positions = estimated_rod_pos[:, 0:3, 3]
+    rod_rot_mats = estimated_rod_pos[:, 0:3, 0:3]
+    est_rod_lin_vel = (rod_positions[1:] - rod_positions[:-1]) / delta_t
+    gt_rod_lin_vel = gt_rods_lin_vel[:, rod_id]
+    plt_error_graph(rod_id, gt_rod_lin_vel, est_rod_lin_vel, window_size, label='lin vel')
 
     # dot_R = rod_rot_mats[:-1] - rod_rot_mats[1:]
     R = rod_rot_mats[:-1]
@@ -122,6 +147,9 @@ for rod_id, color in enumerate(['green', 'red', 'blue']):
                    label=['x', 'y', 'z'],
                    save_to=save_to)
     plt_multiple_x(gt_pos - gt_pos[0], label_y='position (m)', title=f'rod {rod_id} pos gt',
+                   label=['x', 'y', 'z'],
+                   save_to=save_to)
+    plt_multiple_x(rod_positions - rod_positions[0], label_y='position (m)', title=f'rod {rod_id} pos est',
                    label=['x', 'y', 'z'],
                    save_to=save_to)
     # gt_quat = gt_rods_quaternion[:T, rod_id]
