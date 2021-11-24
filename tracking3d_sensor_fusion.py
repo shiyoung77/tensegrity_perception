@@ -40,7 +40,7 @@ class Tracker:
 
         # add end cap (marker) node to graph
         for node, color in enumerate(self.data_cfg['node_to_color']):
-            self.G.add_node(node) 
+            self.G.add_node(node)
             self.G.nodes[node]['color'] = color
             self.G.nodes[node]['pos_list'] = []
 
@@ -49,7 +49,7 @@ class Tracker:
             self.G.add_edge(u, v)
             self.G.edges[u, v]['sensor_id'] = sensor_id
             self.G.edges[u, v]['type'] = 'tendon'
-        
+
         # add rod edge to graph
         for color, (u, v) in self.data_cfg['color_to_rod'].items():
             self.G.add_edge(u, v)
@@ -57,7 +57,7 @@ class Tracker:
             self.G.edges[u, v]['length'] = self.data_cfg['rod_length']
             self.G.edges[u, v]['color'] = color
             self.G.edges[u, v]['pose_list'] = []
-        
+
         # read rod mesh for ICP
         rod_mesh = o3d.io.read_triangle_mesh(rod_mesh_file)
         self.rod_pcd = rod_mesh.sample_points_poisson_disk(6000)
@@ -66,16 +66,6 @@ class Tracker:
         points -= offset  # move point cloud center
         points /= self.data_cfg['rod_scale']  # scale points from millimeter to meter
 
-        # visualize rod and end caps
-        # init_rod_pose = np.eye(4)
-        # rod_frame = perception_utitls.generate_coordinate_frame(init_rod_pose)
-        # end_cap_pose_1 = init_rod_pose.copy()
-        # end_cap_pose_1[:3, 3] += end_cap_pose_1[:3, 2] * self.rod_length / 2
-        # end_cap_frame_1 = perception_utitls.generate_coordinate_frame(end_cap_pose_1)
-        # end_cap_pose_2 = init_rod_pose.copy()
-        # end_cap_pose_2[:3, 3] -= end_cap_pose_2[:3, 2] * self.rod_length / 2
-        # end_cap_frame_2 = perception_utitls.generate_coordinate_frame(end_cap_pose_2)
-        # o3d.visualization.draw_geometries([self.rod_pcd, rod_frame, end_cap_frame_1, end_cap_frame_2])
 
     def initialize(self, color_im: np.ndarray, depth_im: np.ndarray, info: dict,
                    visualize: bool = True, compute_hsv: bool = True):
@@ -86,7 +76,7 @@ class Tracker:
             plane_frame, _ = perception_utils.plane_detection_ransac(scene_pcd, inlier_thresh=0.005, visualize=visualize)
             self.data_cfg['cam_extr'] = np.round(plane_frame, decimals=3)
         scene_pcd.transform(la.inv(self.data_cfg['cam_extr']))
-        
+
         if 'init_end_cap_rois' not in self.data_cfg:
             color_im_bgr = cv2.cvtColor(color_im, cv2.COLOR_RGB2BGR)
             end_cap_rois = dict()
@@ -128,7 +118,7 @@ class Tracker:
                     h_hist += cv2.calcHist([cropped_im_hsv], [0], None, [256], [0, 256])
                     s_hist += cv2.calcHist([cropped_im_hsv], [1], None, [256], [0, 256])
                     v_hist += cv2.calcHist([cropped_im_hsv], [2], None, [256], [0, 256])
-                
+
                 if visualize:
                     plt.plot(h_hist, label='h', color='r')
                     plt.plot(s_hist, label='s', color='g')
@@ -186,7 +176,7 @@ class Tracker:
                 obs_pcd += end_cap_pcd
 
             complete_obs_pcd += obs_pcd
-            
+
             # compute rod pose given end cap centers
             init_pose = self.estimate_rod_pose_from_end_cap_centers(end_cap_centers)
             rod_pcd = copy.deepcopy(self.rod_pcd)
@@ -213,12 +203,13 @@ class Tracker:
 
         if visualize:
             o3d.visualization.draw_geometries([scene_pcd, robot_cloud])
-        
+
         self.initialized = True
+
 
     def update(self, color_im, depth_im, info):
         assert self.initialized, "[Error] You must first initialize the tracker!"
-        color_im_hsv = cv2.cvtColor(color_im, cv2.COLOR_RGB2HSV)        
+        color_im_hsv = cv2.cvtColor(color_im, cv2.COLOR_RGB2HSV)
         scene_pcd_hsv = perception_utils.create_pcd(depth_im, self.data_cfg['cam_intr'], color_im_hsv,
                                                     depth_trunc=self.data_cfg['depth_trunc'],
                                                     cam_extr=self.data_cfg['cam_extr'])
@@ -239,7 +230,8 @@ class Tracker:
 
         robot_cloud = self.rigid_finetune(complete_obs_pcd, robot_cloud)
         return robot_cloud, scene_pcd
-    
+
+
     def visualize(self, robot_cloud, scene_pcd, visualizer):
         visualizer.clear_geometries()
         visualizer.add_geometry(scene_pcd)
@@ -358,7 +350,7 @@ class Tracker:
 
         for i in range(num_end_caps):
             self.G.nodes[i]['pos_list'][-1] = res.x[(3*i):(3*i + 3)].copy()
-        
+
         for color, (u, v) in self.data_cfg['color_to_rod'].items():
             prev_rod_pose = self.G.edges[u, v]['pose_list'][-1]
             u_pos = self.G.nodes[u]['pos_list'][-1]
@@ -366,12 +358,12 @@ class Tracker:
             curr_end_cap_centers = np.vstack([u_pos, v_pos])
             optimized_pose = self.estimate_rod_pose_from_end_cap_centers(curr_end_cap_centers, prev_rod_pose)
             self.G.edges[u, v]['pose_list'][-1] = optimized_pose
-    
+
     def constraint_function_generator(self, u, v, rod_length):
         def constraint_function(X):
             return la.norm(X[(3*u):(3*u + 3)] - X[(3*v):(3*v + 3)]) - rod_length
         return constraint_function
-    
+
     def objective_function_generator(self, sensor_measurement, balance_factor=0.5):
         def objective_function(X):
             unary_loss = 0
@@ -402,10 +394,10 @@ class Tracker:
             self.G.edges[u, v]['pose_list'][-1] = optimized_pose
             self.G.nodes[u]['pos_list'][-1] = optimized_pose[:3, 3] - optimized_pose[:3, 2] * self.rod_length / 2
             self.G.nodes[v]['pos_list'][-1] = optimized_pose[:3, 3] + optimized_pose[:3, 2] * self.rod_length / 2
-        
+
         robot_cloud.transform(delta_transformation)
         return robot_cloud
-    
+
     def estimate_rod_pose_from_end_cap_centers(self, curr_end_cap_centers, prev_rod_pose=None):
         curr_rod_pos = (curr_end_cap_centers[0] + curr_end_cap_centers[1]) / 2
         curr_z_dir = curr_end_cap_centers[1] - curr_end_cap_centers[0]
@@ -413,7 +405,7 @@ class Tracker:
 
         if prev_rod_pose is None:
             prev_rod_pose = np.eye(4)
-        
+
         prev_rot = prev_rod_pose[:3, :3].copy()
         prev_z_dir = prev_rot[:, 2].copy()
 
@@ -444,7 +436,7 @@ class Tracker:
 if __name__ == '__main__':
     parser = ArgumentParser()
     parser.add_argument("--dataset", default="dataset")
-    parser.add_argument("--video_id", default="six_cameras10")
+    parser.add_argument("--video_id", default="fabric2")
     parser.add_argument("--rod_mesh_file", default="pcd/yale/untethered_rod_w_end_cap.ply")
     parser.add_argument("--first_frame_id", default=0, type=int)
     parser.add_argument("-v", "--visualize", default=True, action="store_true")
@@ -458,7 +450,7 @@ if __name__ == '__main__':
 
     tracker = Tracker(data_cfg, rod_mesh_file=args.rod_mesh_file)
 
-    # initialize tracker with the first frame    
+    # initialize tracker with the first frame
     color_path = os.path.join(video_path, 'color', f'{prefixes[args.first_frame_id]}.png')
     depth_path = os.path.join(video_path, 'depth', f'{prefixes[args.first_frame_id]}.png')
     info_path = os.path.join(video_path, 'data', f'{prefixes[args.first_frame_id]}.json')

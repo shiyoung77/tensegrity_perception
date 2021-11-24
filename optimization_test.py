@@ -52,14 +52,14 @@ if __name__ == '__main__':
         info_path = os.path.join(dataset, video_id, 'data', f'{prefix}.json')
         with open(info_path, 'r') as f:
             info = json.load(f)
-        
+
         for sensor_id, (u, v) in data_cfg['sensor_to_tendon'].items():
             measured_dist[sensor_id].append(info['sensors'][str(sensor_id)]['length'] / 100)
 
             u_pos = pos_dict[u][idx]
             v_pos = pos_dict[v][idx]
             predicted_dist[sensor_id].append(la.norm(u_pos - v_pos))
-    
+
     fig, axes = plt.subplots(3, 3)
     for sensor_id in data_cfg['sensor_to_tendon']:
         row = int(sensor_id) // 3

@@ -63,7 +63,7 @@ class Tracker:
             plane_frame, _ = perception_utils.plane_detection_ransac(scene_pcd, inlier_thresh=0.005, visualize=visualize)
             self.data_cfg['cam_extr'] = np.round(plane_frame, decimals=3)
         scene_pcd.transform(la.inv(self.data_cfg['cam_extr']))
-        
+
         if 'init_end_cap_rois' not in self.data_cfg:
             color_im_bgr = cv2.cvtColor(color_im, cv2.COLOR_RGB2BGR)
             end_cap_rois = dict()
@@ -101,7 +101,7 @@ class Tracker:
                     h_hist += cv2.calcHist([cropped_im_hsv], [0], None, [256], [0, 256])
                     s_hist += cv2.calcHist([cropped_im_hsv], [1], None, [256], [0, 256])
                     v_hist += cv2.calcHist([cropped_im_hsv], [2], None, [256], [0, 256])
-                
+
                 if visualize:
                     plt.plot(h_hist, label='h', color='r')
                     plt.plot(s_hist, label='s', color='g')
@@ -155,7 +155,7 @@ class Tracker:
                 end_cap_center = np.asarray(end_cap_pcd.points).mean(axis=0)
                 end_cap_centers.append(end_cap_center)
                 self.end_cap_centers.setdefault(color + '-' + str(i), []).append(end_cap_center)
-            
+
             # compute rod pose given end cap centers
             init_pose = self.estimate_rod_pos_from_end_cap_centers(end_cap_centers)
             rod_pcd = copy.deepcopy(self.rod_pcd)
@@ -190,7 +190,7 @@ class Tracker:
             rendered_color, rendered_depth = self.renderer.render(scene)
             plt.imshow(rendered_depth)
             plt.show()
-        
+
         self.initialized = True
 
 
@@ -198,13 +198,13 @@ class Tracker:
         assert self.initialized, "[Error] You must initialize the tracker!"
         color_im_vis = cv2.cvtColor(color_im, cv2.COLOR_RGB2BGR)
 
-        color_im_hsv = cv2.cvtColor(color_im, cv2.COLOR_RGB2HSV)        
+        color_im_hsv = cv2.cvtColor(color_im, cv2.COLOR_RGB2HSV)
         scene_pcd_hsv = perception_utils.create_pcd(depth_im, self.data_cfg['cam_intr'], color_im_hsv,
                                                     depth_trunc=self.data_cfg['depth_trunc'],
                                                     cam_extr=self.data_cfg['cam_extr'])
         box_to_filter_table = o3d.geometry.AxisAlignedBoundingBox([-10, -10, 0.01], [10, 10, 0.3])
         scene_pcd_hsv = scene_pcd_hsv.crop(box_to_filter_table)
-        
+
         scene_pcd = perception_utils.create_pcd(depth_im, self.data_cfg['cam_intr'], color_im,
                                                 depth_trunc=self.data_cfg['depth_trunc'],
                                                 cam_extr=self.data_cfg['cam_extr'])
@@ -324,7 +324,7 @@ class Tracker:
                     #     pt1 = (max(0, x - 30), min(color_im.shape[1], y - 30))
                     #     pt2 = (max(0, x + 30), min(color_im.shape[0], y + 30))
                     #     # cv2.rectangle(color_im_vis, pt1, pt2, Tracker.ColorDict[color], 2)
-                        
+
                     #     mask = cv2.inRange(color_im_hsv, tuple(self.data_cfg['hsv_ranges'][color][0]),
                     #                                     tuple(self.data_cfg['hsv_ranges'][color][1]))
                     #     mask = mask.astype(bool)
@@ -445,7 +445,7 @@ if __name__ == '__main__':
     # rod_mesh_file = 'pcd/yale/end_cap_with_rod.pcd'
     tracker = Tracker(data_cfg, rod_mesh_file=rod_mesh_file)
 
-    # initialize tracker with the first frame    
+    # initialize tracker with the first frame
     color_path = os.path.join(dataset, video_id, 'color', f'{prefixes[0]}.png')
     depth_path = os.path.join(dataset, video_id, 'depth', f'{prefixes[0]}.png')
     color_im = cv2.cvtColor(cv2.imread(color_path), cv2.COLOR_BGR2RGB)

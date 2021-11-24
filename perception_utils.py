@@ -30,7 +30,7 @@ def create_pcd(depth_im: np.ndarray,
     depth_im_o3d = o3d.geometry.Image(depth_im)
     if color_im is not None:
         color_im_o3d = o3d.geometry.Image(color_im)
-        rgbd = o3d.geometry.RGBDImage.create_from_color_and_depth(color_im_o3d, depth_im_o3d, 
+        rgbd = o3d.geometry.RGBDImage.create_from_color_and_depth(color_im_o3d, depth_im_o3d,
             depth_scale=depth_scale, depth_trunc=depth_trunc, convert_rgb_to_intensity=False)
         pcd = o3d.geometry.PointCloud.create_from_rgbd_image(rgbd, intrinsic_o3d, extrinsic=cam_extr)
     else:
@@ -71,7 +71,7 @@ def plane_detection_ransac(pcd: o3d.geometry.PointCloud,
         inlier_thresh (float): [inlier distance threshold between a point to a plain]
         max_iterations (int): [max number of iteration to perform for RANSAC]
         early_stop_thresh (float): [inlier ratio to stop RANSAC early]
-    
+
     Return:
         frame (np.ndarray): [z_dir is the estimated plane normal towards the camera, x_dir and y_dir randomly sampled]
         inlier ratio (float): [ratio of inliers in the estimated plane]
@@ -106,7 +106,7 @@ def plane_detection_ransac(pcd: o3d.geometry.PointCloud,
 
         if inlier_ratio > early_stop_thresh:
             break
-    
+
     # if plane_normal[2] < 0:
     #     plane_normal *= -1
     if plane_normal @ origin > 0:

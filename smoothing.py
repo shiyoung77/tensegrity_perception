@@ -95,7 +95,7 @@ if __name__ == '__main__':
             mean_rot = U @ V_h
             mean_trans = mean_trans_hat / window_size
 
-            mean_pose = np.eye(4) 
+            mean_pose = np.eye(4)
             mean_pose[:3, :3] = mean_rot
             mean_pose[:3, 3] = mean_trans
             smoothed_color_poses[color][i] = mean_pose
