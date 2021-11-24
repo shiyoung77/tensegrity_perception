@@ -18,8 +18,8 @@ from tqdm import tqdm
 
 import perception_utils
 
-class Tracker:
 
+class Tracker:
     ColorDict = {
         "red": [255, 0, 0],
         "green": [0, 255, 0],
@@ -73,8 +73,11 @@ class Tracker:
         scene_pcd = perception_utils.create_pcd(depth_im, self.data_cfg['cam_intr'], color_im,
                                      depth_trunc=self.data_cfg['depth_trunc'])
         if 'cam_extr' not in self.data_cfg:
-            plane_frame, _ = perception_utils.plane_detection_ransac(scene_pcd, inlier_thresh=0.005, visualize=visualize)
+            plane_frame, _ = perception_utils.plane_detection_ransac(scene_pcd, inlier_thresh=0.005,
+                                                                     visualize=visualize)
             self.data_cfg['cam_extr'] = np.round(plane_frame, decimals=3)
+        else:
+            plane_frame = self.data_cfg['cam_extr']
         scene_pcd.transform(la.inv(self.data_cfg['cam_extr']))
 
         if 'init_end_cap_rois' not in self.data_cfg:
@@ -186,8 +189,8 @@ class Tracker:
             rod_pose = icp_result.transformation
             rod_pcd.transform(rod_pose)
             self.G.edges[u, v]['pose_list'].append(rod_pose)
-            self.G.nodes[u]['pos_list'].append(rod_pose[:3, 3] - rod_pose[:3, 2] * self.rod_length / 2)
-            self.G.nodes[v]['pos_list'].append(rod_pose[:3, 3] + rod_pose[:3, 2] * self.rod_length / 2)
+            self.G.nodes[u]['pos_list'].append(rod_pose[:3, 3] + rod_pose[:3, 2] * self.rod_length / 2)
+            self.G.nodes[v]['pos_list'].append(rod_pose[:3, 3] - rod_pose[:3, 2] * self.rod_length / 2)
 
         self.constrained_optimization(info, balance_factor=0.8)
 
@@ -200,10 +203,8 @@ class Tracker:
             robot_cloud += rod_pcd
 
         robot_cloud = self.rigid_finetune(complete_obs_pcd, robot_cloud)
-
         if visualize:
             o3d.visualization.draw_geometries([scene_pcd, robot_cloud])
-
         self.initialized = True
 
 
@@ -318,8 +319,8 @@ class Tracker:
                 curr_pose = prev_pose.copy()
 
             self.G.edges[u, v]['pose_list'].append(curr_pose)
-            self.G.nodes[u]['pos_list'].append(curr_pose[:3, 3] - curr_pose[:3, 2] * self.rod_length / 2)
-            self.G.nodes[v]['pos_list'].append(curr_pose[:3, 3] + curr_pose[:3, 2] * self.rod_length / 2)
+            self.G.nodes[u]['pos_list'].append(curr_pose[:3, 3] + curr_pose[:3, 2] * self.rod_length / 2)
+            self.G.nodes[v]['pos_list'].append(curr_pose[:3, 3] - curr_pose[:3, 2] * self.rod_length / 2)
 
         return complete_obs_pcd
 
@@ -332,7 +333,7 @@ class Tracker:
 
         init_values = np.zeros(3 * num_end_caps)
         for i in range(num_end_caps):
-            init_values[(3*i):(3*i + 3)] = self.G.nodes[i]['pos_list'][-1]
+            init_values[(3 * i):(3 * i + 3)] = self.G.nodes[i]['pos_list'][-1]
 
         # be VERY CAREFUL when generating a lambda function in a for loop
         # https://stackoverflow.com/questions/45491376/
@@ -349,36 +350,39 @@ class Tracker:
         assert res.success, "Optimization fail! Something must be wrong."
 
         for i in range(num_end_caps):
-            self.G.nodes[i]['pos_list'][-1] = res.x[(3*i):(3*i + 3)].copy()
+            self.G.nodes[i]['pos_list'][-1] = res.x[(3 * i):(3 * i + 3)].copy()
 
         for color, (u, v) in self.data_cfg['color_to_rod'].items():
             prev_rod_pose = self.G.edges[u, v]['pose_list'][-1]
             u_pos = self.G.nodes[u]['pos_list'][-1]
             v_pos = self.G.nodes[v]['pos_list'][-1]
             curr_end_cap_centers = np.vstack([u_pos, v_pos])
+            # curr_end_cap_centers = np.vstack([v_pos, u_pos])
             optimized_pose = self.estimate_rod_pose_from_end_cap_centers(curr_end_cap_centers, prev_rod_pose)
             self.G.edges[u, v]['pose_list'][-1] = optimized_pose
 
     def constraint_function_generator(self, u, v, rod_length):
         def constraint_function(X):
-            return la.norm(X[(3*u):(3*u + 3)] - X[(3*v):(3*v + 3)]) - rod_length
+            return la.norm(X[(3 * u):(3 * u + 3)] - X[(3 * v):(3 * v + 3)]) - rod_length
+
         return constraint_function
 
     def objective_function_generator(self, sensor_measurement, balance_factor=0.5):
         def objective_function(X):
             unary_loss = 0
             for i in range(len(self.data_cfg['node_to_color'])):
-                pos = X[(3*i):(3*i + 3)]
+                pos = X[(3 * i):(3 * i + 3)]
                 estimated_pos = self.G.nodes[i]['pos_list'][-1]
-                unary_loss += la.norm(pos - estimated_pos)**2
+                unary_loss += la.norm(pos - estimated_pos) ** 2
             binary_loss = 0
             for sensor_id, (u, v) in data_cfg['sensor_to_tendon'].items():
-                u_pos = X[(3*u):(3*u + 3)]
-                v_pos = X[(3*v):(3*v + 3)]
+                u_pos = X[(3 * u):(3 * u + 3)]
+                v_pos = X[(3 * v):(3 * v + 3)]
                 estimated_length = la.norm(u_pos - v_pos)
                 measured_length = sensor_measurement[str(sensor_id)]['length'] / 100
-                binary_loss += (estimated_length - measured_length)**2
+                binary_loss += (estimated_length - measured_length) ** 2
             return balance_factor * unary_loss + (1 - balance_factor) * binary_loss
+
         return objective_function
 
     def rigid_finetune(self, obs_cloud, robot_cloud):
@@ -392,15 +396,15 @@ class Tracker:
             prev_rod_pose = self.G.edges[u, v]['pose_list'][-1]
             optimized_pose = delta_transformation @ prev_rod_pose
             self.G.edges[u, v]['pose_list'][-1] = optimized_pose
-            self.G.nodes[u]['pos_list'][-1] = optimized_pose[:3, 3] - optimized_pose[:3, 2] * self.rod_length / 2
-            self.G.nodes[v]['pos_list'][-1] = optimized_pose[:3, 3] + optimized_pose[:3, 2] * self.rod_length / 2
+            self.G.nodes[u]['pos_list'][-1] = optimized_pose[:3, 3] + optimized_pose[:3, 2] * self.rod_length / 2
+            self.G.nodes[v]['pos_list'][-1] = optimized_pose[:3, 3] - optimized_pose[:3, 2] * self.rod_length / 2
 
         robot_cloud.transform(delta_transformation)
         return robot_cloud
 
     def estimate_rod_pose_from_end_cap_centers(self, curr_end_cap_centers, prev_rod_pose=None):
         curr_rod_pos = (curr_end_cap_centers[0] + curr_end_cap_centers[1]) / 2
-        curr_z_dir = curr_end_cap_centers[1] - curr_end_cap_centers[0]
+        curr_z_dir = curr_end_cap_centers[0] - curr_end_cap_centers[1]
         curr_z_dir /= la.norm(curr_z_dir)
 
         if prev_rod_pose is None:

@@ -29,7 +29,8 @@ def visualize(visualizer, data_cfg, vis_cloud):
 
 if __name__ == '__main__':
     dataset = 'dataset'
-    video_id = '9-21_0'
+    # video_id = '9-21_0'
+    video_id = 'crawling_sim'
     prefixes = sorted([i.split('.')[0] for i in os.listdir(os.path.join(dataset, video_id, 'color'))])
 
     data_cfg_module = importlib.import_module(f'{dataset}.{video_id}.config')
@@ -49,8 +50,10 @@ if __name__ == '__main__':
 
     color_poses = dict()
     smoothed_color_poses = dict()
-
-    window_size = 7
+    pose_output_folder = os.path.join(dataset, video_id, 'smoothed_poses')
+    if not os.path.isdir(pose_output_folder):
+        os.makedirs(pose_output_folder)
+    window_size = 10
     t = (window_size - 1) // 2
 
     # visualizer = o3d.visualization.Visualizer()
@@ -89,7 +92,7 @@ if __name__ == '__main__':
                 pos = pose[:3, 3]
                 mean_rot_hat += rot
                 mean_trans_hat += pos
-
+            # mean_rot_hat /= window_size
             U, D, V_h = np.linalg.svd(mean_rot_hat, full_matrices=True)
             assert np.allclose((U * D) @ V_h, mean_rot_hat)
             mean_rot = U @ V_h
@@ -113,6 +116,9 @@ if __name__ == '__main__':
         # visualize(visualizer, data_cfg, vis_cloud)
         visualize(visualizer2, data_cfg, vis_cloud2)
 
-        # o3d.io.write_point_cloud(os.path.join(dataset, video_id, "smoothed_estimation_cloud", f"{i:04d}.ply"), vis_cloud)
-        # visualizer.capture_screen_image(os.path.join(dataset, video_id, "smoothed_estimation", f"{i:04d}.png"))
-        visualizer2.capture_screen_image(os.path.join(dataset, video_id, "raw_estimation", f"{i:04d}.png"))
+        o3d.io.write_point_cloud(os.path.join(dataset, video_id, "smoothed_estimation_cloud", f"{i:04d}.ply"), vis_cloud)
+        visualizer2.capture_screen_image(os.path.join(dataset, video_id, "smoothed_estimation", f"{i:04d}.png"))
+        # visualizer2.capture_screen_image(os.path.join(dataset, video_id, "raw_estimation", f"{i:04d}.png"))
+
+    for color in data_cfg['end_cap_colors']:
+        np.save(os.path.join(pose_output_folder, f'{color}.npy'), smoothed_color_poses[color])
