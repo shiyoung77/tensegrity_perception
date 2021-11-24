@@ -58,6 +58,7 @@ if __name__ == '__main__':
     parser.add_argument("--video_id", default="fabric2")
     # parser.add_argument("--video_id", default="six_cameras10")
     parser.add_argument("--rod_mesh_file", default="pcd/yale/untethered_rod_w_end_cap.ply")
+    parser.add_argument("--rod_pcd_file", default="pcd/yale/untethered_rod_w_end_cap.pcd")
     parser.add_argument("--first_frame_id", default=0, type=int)
     args = parser.parse_args()
 
@@ -73,12 +74,22 @@ if __name__ == '__main__':
         "blue": [0, 0, 255]
     }
 
-    rod_mesh = o3d.io.read_triangle_mesh(args.rod_mesh_file)
-    rod_pcd = rod_mesh.sample_points_poisson_disk(3000)
-    points = np.asarray(rod_pcd.points)
-    offset = points.mean(0)
-    points -= offset  # move point cloud center
-    points /= data_cfg['rod_scale']  # scale points from millimeter to meter
+    assert os.path.isfile(args.rod_mesh_file) or os.path.isfile(args.rod_pcd_file), "rod geometry file is not found!"
+    if os.path.isfile(args.rod_pcd_file):
+        print(f"read rod pcd from {args.rod_pcd_file}")
+        rod_pcd = o3d.io.read_point_cloud(args.rod_pcd_file)
+    else:
+        print(f"read rod triangle mesh from {args.rod_mesh_file}")
+        rod_mesh = o3d.io.read_triangle_mesh(args.rod_mesh_file)
+        rod_pcd = rod_mesh.sample_points_poisson_disk(5000)
+        points = np.asarray(rod_pcd.points)
+        offset = points.mean(0)
+        points -= offset  # move point cloud center
+        points /= data_cfg['rod_scale']  # scale points from millimeter to meter
+        pcd_path = ".".join(args.rod_mesh_file.split('.')[:-1]) + ".pcd"
+        o3d.io.write_point_cloud(pcd_path, rod_pcd)
+        print(f"rod pcd file is generated and saved to {pcd_path}")
+
     # o3d.visualization.draw_geometries([rod_pcd])
 
     visualizer = o3d.visualization.Visualizer()

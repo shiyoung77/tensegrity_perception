@@ -10,27 +10,29 @@ import numpy as np
 import cv2
 import networkx as nx
 import open3d as o3d
-from scipy import linalg as la
+import scipy.linalg as la
 from scipy.optimize import minimize
 from matplotlib import pyplot as plt
-from tqdm.contrib import tenumerate
 from tqdm import tqdm
 
 import perception_utils
 
 
 class Tracker:
+
     ColorDict = {
         "red": [255, 0, 0],
         "green": [0, 255, 0],
         "blue": [0, 0, 255]
     }
 
-    def __init__(self, data_cfg, rod_mesh_file):
+
+    def __init__(self, data_cfg, rod_pcd):
         self.data_cfg = data_cfg
         pprint.pprint(self.data_cfg)
         self.initialized = False
 
+        self.rod_pcd = copy.deepcopy(rod_pcd)
         self.rod_length = self.data_cfg['rod_length']
 
         # initialize graph
@@ -57,14 +59,6 @@ class Tracker:
             self.G.edges[u, v]['length'] = self.data_cfg['rod_length']
             self.G.edges[u, v]['color'] = color
             self.G.edges[u, v]['pose_list'] = []
-
-        # read rod mesh for ICP
-        rod_mesh = o3d.io.read_triangle_mesh(rod_mesh_file)
-        self.rod_pcd = rod_mesh.sample_points_poisson_disk(6000)
-        points = np.asarray(self.rod_pcd.points)
-        offset = points.mean(0)
-        points -= offset  # move point cloud center
-        points /= self.data_cfg['rod_scale']  # scale points from millimeter to meter
 
 
     def initialize(self, color_im: np.ndarray, depth_im: np.ndarray, info: dict,
@@ -147,10 +141,11 @@ class Tracker:
                 masked_depth_im[pt1[1]:pt2[1], pt1[0]:pt2[0]] = depth_im[pt1[1]:pt2[1], pt1[0]:pt2[0]]
 
                 color_im_hsv = cv2.cvtColor(color_im, cv2.COLOR_RGB2HSV)
-                masked_color_im = np.zeros_like(color_im_hsv)
-                masked_color_im[pt1[1]:pt2[1], pt1[0]:pt2[0]] = color_im_hsv[pt1[1]:pt2[1], pt1[0]:pt2[0]]
-                end_cap_pcd = perception_utils.create_pcd(masked_depth_im, self.data_cfg['cam_intr'], masked_color_im,
+                masked_hsv_im = np.zeros_like(color_im_hsv)
+                masked_hsv_im[pt1[1]:pt2[1], pt1[0]:pt2[0]] = color_im_hsv[pt1[1]:pt2[1], pt1[0]:pt2[0]]
+                end_cap_pcd = perception_utils.create_pcd(masked_depth_im, self.data_cfg['cam_intr'], masked_hsv_im,
                                                           cam_extr=self.data_cfg['cam_extr'])
+                o3d.visualization.draw_geometries([end_cap_pcd])
 
                 # filter end_cap_pcd by HSV
                 points_hsv = np.asarray(end_cap_pcd.colors) * 255
@@ -166,12 +161,16 @@ class Tracker:
 
                 end_cap_pcd = end_cap_pcd.select_by_index(valid_indices)
 
+                # end_cap_pcd = end_cap_pcd.paint_uniform_color(np.array(self.ColorDict[color]) / 255)
+                # o3d.visualization.draw_geometries([end_cap_pcd])
+
                 # filter end_cap_pcd by finding the largest cluster
                 labels = np.asarray(end_cap_pcd.cluster_dbscan(eps=0.02, min_points=10, print_progress=False))
                 points_for_each_cluster = [(labels == label).sum() for label in range(labels.max() + 1)]
                 label = np.argmax(points_for_each_cluster)
                 masked_indices = np.where(labels == label)[0]
                 end_cap_pcd = end_cap_pcd.select_by_index(masked_indices)
+                o3d.visualization.draw_geometries([end_cap_pcd])
 
                 end_cap_center = np.asarray(end_cap_pcd.points).mean(axis=0)
                 end_cap_centers.append(end_cap_center)
@@ -191,6 +190,8 @@ class Tracker:
             self.G.edges[u, v]['pose_list'].append(rod_pose)
             self.G.nodes[u]['pos_list'].append(rod_pose[:3, 3] + rod_pose[:3, 2] * self.rod_length / 2)
             self.G.nodes[v]['pos_list'].append(rod_pose[:3, 3] - rod_pose[:3, 2] * self.rod_length / 2)
+
+        o3d.visualization.draw_geometries([complete_obs_pcd])
 
         self.constrained_optimization(info, balance_factor=0.8)
 
@@ -252,6 +253,7 @@ class Tracker:
         visualizer.get_view_control().convert_from_pinhole_camera_parameters(cam_params)
         visualizer.poll_events()
         visualizer.update_renderer()
+
 
     def track_with_rgbd(self, scene_pcd_hsv):
         complete_obs_pcd = o3d.geometry.PointCloud()
@@ -324,6 +326,7 @@ class Tracker:
 
         return complete_obs_pcd
 
+
     def constrained_optimization(self, info, balance_factor=0.8):
         rod_length = self.data_cfg['rod_length']
         num_end_caps = 2 * self.data_cfg['num_rods']  # a rod has two end caps
@@ -361,11 +364,13 @@ class Tracker:
             optimized_pose = self.estimate_rod_pose_from_end_cap_centers(curr_end_cap_centers, prev_rod_pose)
             self.G.edges[u, v]['pose_list'][-1] = optimized_pose
 
+
     def constraint_function_generator(self, u, v, rod_length):
         def constraint_function(X):
             return la.norm(X[(3 * u):(3 * u + 3)] - X[(3 * v):(3 * v + 3)]) - rod_length
 
         return constraint_function
+
 
     def objective_function_generator(self, sensor_measurement, balance_factor=0.5):
         def objective_function(X):
@@ -385,6 +390,7 @@ class Tracker:
 
         return objective_function
 
+
     def rigid_finetune(self, obs_cloud, robot_cloud):
         icp_result = perception_utils.icp(robot_cloud, obs_cloud, max_iter=30, init=np.eye(4))
         if icp_result.fitness > 0.7 and la.norm(icp_result.transformation[:3, 3]) < 0.05:
@@ -401,6 +407,7 @@ class Tracker:
 
         robot_cloud.transform(delta_transformation)
         return robot_cloud
+
 
     def estimate_rod_pose_from_end_cap_centers(self, curr_end_cap_centers, prev_rod_pose=None):
         curr_rod_pos = (curr_end_cap_centers[0] + curr_end_cap_centers[1]) / 2
@@ -440,8 +447,10 @@ class Tracker:
 if __name__ == '__main__':
     parser = ArgumentParser()
     parser.add_argument("--dataset", default="dataset")
-    parser.add_argument("--video_id", default="fabric2")
+    # parser.add_argument("--video_id", default="fabric2")
+    parser.add_argument("--video_id", default="six_cameras10")
     parser.add_argument("--rod_mesh_file", default="pcd/yale/untethered_rod_w_end_cap.ply")
+    parser.add_argument("--rod_pcd_file", default="pcd/yale/untethered_rod_w_end_cap.pcd")
     parser.add_argument("--first_frame_id", default=0, type=int)
     parser.add_argument("-v", "--visualize", default=True, action="store_true")
     args = parser.parse_args()
@@ -449,10 +458,28 @@ if __name__ == '__main__':
     video_path = os.path.join(args.dataset, args.video_id)
     prefixes = sorted([i.split('.')[0] for i in os.listdir(os.path.join(video_path, 'color'))])
 
+    # read data config
     data_cfg_module = importlib.import_module(f'{args.dataset}.{args.video_id}.config')
     data_cfg = data_cfg_module.get_config(read_cfg=True)
 
-    tracker = Tracker(data_cfg, rod_mesh_file=args.rod_mesh_file)
+    # read rod geometry
+    assert os.path.isfile(args.rod_mesh_file) or os.path.isfile(args.rod_pcd_file), "rod geometry is not found!"
+    if os.path.isfile(args.rod_pcd_file):
+        print(f"read rod pcd from {args.rod_pcd_file}")
+        rod_pcd = o3d.io.read_point_cloud(args.rod_pcd_file)
+    else:
+        print(f"read rod triangle mesh from {args.rod_mesh_file}")
+        rod_mesh = o3d.io.read_triangle_mesh(args.rod_mesh_file)
+        rod_pcd = rod_mesh.sample_points_poisson_disk(5000)
+        points = np.asarray(rod_pcd.points)
+        offset = points.mean(0)
+        points -= offset  # move point cloud center
+        points /= data_cfg['rod_scale']  # scale points from millimeter to meter
+        pcd_path = ".".join(args.rod_mesh_file.split('.')[:-1]) + ".pcd"
+        o3d.io.write_point_cloud(pcd_path, rod_pcd)
+        print(f"rod pcd file is generated and saved to {pcd_path}")
+
+    tracker = Tracker(data_cfg, rod_pcd)
 
     # initialize tracker with the first frame
     color_path = os.path.join(video_path, 'color', f'{prefixes[args.first_frame_id]}.png')
