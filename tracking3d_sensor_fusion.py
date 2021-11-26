@@ -7,10 +7,10 @@ import json
 from argparse import ArgumentParser
 
 import numpy as np
+import numpy.linalg as la
 import cv2
 import networkx as nx
 import open3d as o3d
-import scipy.linalg as la
 from scipy.optimize import minimize
 from matplotlib import pyplot as plt
 from tqdm import tqdm
@@ -65,7 +65,7 @@ class Tracker:
                    visualize: bool = True, compute_hsv: bool = True):
 
         scene_pcd = perception_utils.create_pcd(depth_im, self.data_cfg['cam_intr'], color_im,
-                                     depth_trunc=self.data_cfg['depth_trunc'])
+                                                depth_trunc=self.data_cfg['depth_trunc'])
         if 'cam_extr' not in self.data_cfg:
             plane_frame, _ = perception_utils.plane_detection_ransac(scene_pcd, inlier_thresh=0.005,
                                                                      visualize=visualize)
@@ -145,7 +145,7 @@ class Tracker:
                 masked_hsv_im[pt1[1]:pt2[1], pt1[0]:pt2[0]] = color_im_hsv[pt1[1]:pt2[1], pt1[0]:pt2[0]]
                 end_cap_pcd = perception_utils.create_pcd(masked_depth_im, self.data_cfg['cam_intr'], masked_hsv_im,
                                                           cam_extr=self.data_cfg['cam_extr'])
-                o3d.visualization.draw_geometries([end_cap_pcd])
+                # o3d.visualization.draw_geometries([end_cap_pcd])
 
                 # filter end_cap_pcd by HSV
                 points_hsv = np.asarray(end_cap_pcd.colors) * 255
@@ -161,7 +161,7 @@ class Tracker:
 
                 end_cap_pcd = end_cap_pcd.select_by_index(valid_indices)
 
-                # end_cap_pcd = end_cap_pcd.paint_uniform_color(np.array(self.ColorDict[color]) / 255)
+                end_cap_pcd = end_cap_pcd.paint_uniform_color(np.array(self.ColorDict[color]) / 255)
                 # o3d.visualization.draw_geometries([end_cap_pcd])
 
                 # filter end_cap_pcd by finding the largest cluster
@@ -170,7 +170,7 @@ class Tracker:
                 label = np.argmax(points_for_each_cluster)
                 masked_indices = np.where(labels == label)[0]
                 end_cap_pcd = end_cap_pcd.select_by_index(masked_indices)
-                o3d.visualization.draw_geometries([end_cap_pcd])
+                # o3d.visualization.draw_geometries([end_cap_pcd])
 
                 end_cap_center = np.asarray(end_cap_pcd.points).mean(axis=0)
                 end_cap_centers.append(end_cap_center)
@@ -186,12 +186,11 @@ class Tracker:
             icp_result = perception_utils.icp(rod_pcd, obs_pcd, max_iter=30, init=init_pose)
             print(f"init icp fitness ({color}):", icp_result.fitness)
             rod_pose = icp_result.transformation
-            rod_pcd.transform(rod_pose)
             self.G.edges[u, v]['pose_list'].append(rod_pose)
             self.G.nodes[u]['pos_list'].append(rod_pose[:3, 3] + rod_pose[:3, 2] * self.rod_length / 2)
             self.G.nodes[v]['pos_list'].append(rod_pose[:3, 3] - rod_pose[:3, 2] * self.rod_length / 2)
 
-        o3d.visualization.draw_geometries([complete_obs_pcd])
+        # o3d.visualization.draw_geometries([complete_obs_pcd])
 
         self.constrained_optimization(info, balance_factor=0.8)
 
@@ -332,7 +331,8 @@ class Tracker:
         num_end_caps = 2 * self.data_cfg['num_rods']  # a rod has two end caps
 
         sensor_measurement = info['sensors']
-        obj_func = self.objective_function_generator(sensor_measurement, balance_factor=balance_factor)
+        sensor_status = info['sensor_status']
+        obj_func = self.objective_function_generator(sensor_measurement, sensor_status, balance_factor=balance_factor)
 
         init_values = np.zeros(3 * num_end_caps)
         for i in range(num_end_caps):
@@ -348,7 +348,6 @@ class Tracker:
             constraint['fun'] = self.constraint_function_generator(u, v, rod_length)
             rod_constraints.append(constraint)
 
-        # res = minimize(obj_func, init_values, method='SLSQP', constraints=[])
         res = minimize(obj_func, init_values, method='SLSQP', constraints=rod_constraints)
         assert res.success, "Optimization fail! Something must be wrong."
 
@@ -360,35 +359,46 @@ class Tracker:
             u_pos = self.G.nodes[u]['pos_list'][-1]
             v_pos = self.G.nodes[v]['pos_list'][-1]
             curr_end_cap_centers = np.vstack([u_pos, v_pos])
-            # curr_end_cap_centers = np.vstack([v_pos, u_pos])
             optimized_pose = self.estimate_rod_pose_from_end_cap_centers(curr_end_cap_centers, prev_rod_pose)
             self.G.edges[u, v]['pose_list'][-1] = optimized_pose
 
 
-    def constraint_function_generator(self, u, v, rod_length):
-        def constraint_function(X):
-            return la.norm(X[(3 * u):(3 * u + 3)] - X[(3 * v):(3 * v + 3)]) - rod_length
+    def objective_function_generator(self, sensor_measurement, sensor_status, balance_factor=0.5):
 
-        return constraint_function
-
-
-    def objective_function_generator(self, sensor_measurement, balance_factor=0.5):
         def objective_function(X):
             unary_loss = 0
             for i in range(len(self.data_cfg['node_to_color'])):
                 pos = X[(3 * i):(3 * i + 3)]
                 estimated_pos = self.G.nodes[i]['pos_list'][-1]
-                unary_loss += la.norm(pos - estimated_pos) ** 2
+                unary_loss += np.sum((pos - estimated_pos)**2)
+                # unary_loss += la.norm(pos - estimated_pos)
+
             binary_loss = 0
             for sensor_id, (u, v) in data_cfg['sensor_to_tendon'].items():
+                if not sensor_status[sensor_id]:  # sensor is broken
+                    continue
+
                 u_pos = X[(3 * u):(3 * u + 3)]
                 v_pos = X[(3 * v):(3 * v + 3)]
                 estimated_length = la.norm(u_pos - v_pos)
                 measured_length = sensor_measurement[str(sensor_id)]['length'] / 100
-                binary_loss += (estimated_length - measured_length) ** 2
+                binary_loss += (estimated_length - measured_length)**2
+                # binary_loss += np.abs(estimated_length - measured_length)
+
             return balance_factor * unary_loss + (1 - balance_factor) * binary_loss
 
         return objective_function
+
+
+    def constraint_function_generator(self, u, v, rod_length):
+
+        def constraint_function(X):
+            u_pos = X[3*u : 3*u + 3]
+            v_pos = X[3*v : 3*v + 3]
+            return la.norm(u_pos - v_pos) - rod_length
+            # return (la.norm(u_pos - v_pos) - rod_length)**2
+
+        return constraint_function
 
 
     def rigid_finetune(self, obs_cloud, robot_cloud):
@@ -489,6 +499,10 @@ if __name__ == '__main__':
     depth_im = cv2.imread(depth_path, cv2.IMREAD_UNCHANGED).astype(np.float32) / data_cfg['depth_scale']
     with open(info_path, 'r') as f:
         info = json.load(f)
+
+    info['sensor_status'] = {key: True for key in info['sensors'].keys()}
+    # info['sensor_status']['2'] = False
+
     tracker.initialize(color_im, depth_im, info, visualize=args.visualize, compute_hsv=False)
     data_cfg_module.write_config(tracker.data_cfg)
 
@@ -512,6 +526,9 @@ if __name__ == '__main__':
         depth_im = cv2.imread(depth_path, cv2.IMREAD_UNCHANGED).astype(np.float32) / data_cfg['depth_scale']
         with open(info_path, 'r') as f:
             info = json.load(f)
+
+        info['sensor_status'] = {key: True for key in info['sensors'].keys()}
+        # info['sensor_status']['2'] = False
 
         robot_cloud, scene_pcd = tracker.update(color_im, depth_im, info)
         estimation_cloud = robot_cloud + scene_pcd
