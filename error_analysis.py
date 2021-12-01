@@ -103,6 +103,7 @@ for rod_id, color in enumerate(['green', 'red', 'blue']):
     rod_directions = -np.matmul(rod_rot_mats, [[0], [0], [1.]]).squeeze(-1)
     rod_ang_vel = list()
     rod_angles = list()
+    T = len(estimated_rod_pos)
     for t in range(T - 1):
         m = np_rotmat_of_two_v(rod_directions[t], rod_directions[t + 1])
         axis, angle = np_rotmat_to_axis_angle(m)
@@ -116,7 +117,7 @@ for rod_id, color in enumerate(['green', 'red', 'blue']):
     rod_ang_vel = np.asarray(rod_ang_vel)
 
     gt_lin_vel = gt_rods_lin_vel[:T - window_size, rod_id]
-    rod_lin_vel = filter(rod_lin_vel, window_size=window_size)
+    rod_lin_vel = filter(est_rod_lin_vel, window_size=window_size)
     plt_multiple_x(gt_lin_vel - rod_lin_vel, label_y='error(m/s)', title=f'rod {rod_id} lin vel error',
                    label=['x', 'y', 'z'],
                    save_to=save_to)
