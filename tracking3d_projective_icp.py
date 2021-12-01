@@ -184,7 +184,7 @@ class Tracker:
             # icp refinement
             mesh_node = pyrender.Node(name='mesh', mesh=self.rod_mesh, matrix=np.eye(4))
             rod_pose = self.projective_icp_cuda(obs_depth_im, [mesh_node], [init_pose], max_iter=30, max_distance=0.02,
-                                                early_stop_thresh=0.0015, verbose=True)[0]
+                                                early_stop_thresh=0.0015, verbose=False)[0]
 
             self.G.edges[u, v]['pose_list'].append(rod_pose)
             self.G.nodes[u]['pos_list'].append(rod_pose[:3, 3] + rod_pose[:3, 2] * self.rod_length / 2)
@@ -217,9 +217,19 @@ class Tracker:
 
     def update(self, color_im, depth_im, info):
         assert self.initialized, "[Error] You must first initialize the tracker!"
-        complete_obs_depth = self.track_with_rgbd(color_im, depth_im)
-        self.constrained_optimization(info, balance_factor=0.8)
+
+        complete_obs_mask = self.track_with_rgbd(color_im, depth_im)
+
+        self.constrained_optimization(info, balance_factor=0.3)
+
+        complete_obs_color = np.zeros_like(color_im)
+        complete_obs_depth = np.zeros_like(depth_im)
+        complete_obs_color[complete_obs_mask] = color_im[complete_obs_mask]
+        complete_obs_depth[complete_obs_mask] = depth_im[complete_obs_mask]
+
         self.rigid_finetune(complete_obs_depth)
+
+        return complete_obs_color, complete_obs_depth
 
 
     def track_with_rgbd(self, color_im, depth_im):
@@ -232,8 +242,8 @@ class Tracker:
             obs_depth_im = np.zeros_like(depth_im)
 
             hsv_mask = cv2.inRange(color_im_hsv,
-                                    lowerb=tuple(self.data_cfg['hsv_ranges'][color][0]),
-                                    upperb=tuple(self.data_cfg['hsv_ranges'][color][1])).astype(np.bool8)
+                                   lowerb=tuple(self.data_cfg['hsv_ranges'][color][0]),
+                                   upperb=tuple(self.data_cfg['hsv_ranges'][color][1])).astype(np.bool8)
             if color == 'red':
                 hsv_mask |= cv2.inRange(color_im_hsv, lowerb=(0, 150, 50), upperb=(20, 255, 255)).astype(np.bool8)
 
@@ -247,9 +257,7 @@ class Tracker:
             self.G.nodes[u]['pos_list'].append(rod_pose[:3, 3] + rod_pose[:3, 2] * self.rod_length / 2)
             self.G.nodes[v]['pos_list'].append(rod_pose[:3, 3] - rod_pose[:3, 2] * self.rod_length / 2)
 
-        complete_obs_depth = np.zeros_like(depth_im)
-        complete_obs_depth[complete_obs_mask] = depth_im[complete_obs_mask]
-        return complete_obs_depth
+        return complete_obs_mask
 
 
     def constrained_optimization(self, info, balance_factor=0.8):
@@ -535,6 +543,7 @@ if __name__ == '__main__':
     os.makedirs(os.path.join(video_path, "scene_cloud"), exist_ok=True)
     os.makedirs(os.path.join(video_path, "estimation_cloud"), exist_ok=True)
     os.makedirs(os.path.join(video_path, "raw_estimation"), exist_ok=True)
+    os.makedirs(os.path.join(video_path, "observation"), exist_ok=True)
 
     if args.visualize:
         visualizer = o3d.visualization.Visualizer()
@@ -555,7 +564,10 @@ if __name__ == '__main__':
         info['sensor_status'] = {key: True for key in info['sensors'].keys()}
         # info['sensor_status']['2'] = False
 
-        tracker.update(color_im, depth_im, info)
+        complete_obs_color, complete_obs_depth = tracker.update(color_im, depth_im, info)
+        # complete_obs_bgr = cv2.cvtColor(complete_obs_color, cv2.COLOR_RGB2BGR)
+        # complete_obs_bgr[complete_obs_depth == 0] = 0
+        # cv2.imwrite(os.path.join(video_path, 'observation', f"{idx:04d}.png"), complete_obs_bgr)
 
         if args.visualize:
             cv2.imshow("observation", color_im_bgr)
@@ -575,8 +587,8 @@ if __name__ == '__main__':
 
             estimation_cloud = robot_cloud + scene_pcd
             visualize(data_cfg, estimation_cloud, visualizer)
-            visualizer.capture_screen_image(os.path.join(video_path, "raw_estimation", f"{idx:04d}.png"))
-            o3d.io.write_point_cloud(os.path.join(video_path, "estimation_cloud", f"{idx:04d}.ply"), estimation_cloud)
+            # visualizer.capture_screen_image(os.path.join(video_path, "raw_estimation", f"{idx:04d}.png"))
+            # o3d.io.write_point_cloud(os.path.join(video_path, "estimation_cloud", f"{idx:04d}.ply"), estimation_cloud)
 
     # save rod poses and end cap positions to file
     pose_output_folder = os.path.join(video_path, "poses")
