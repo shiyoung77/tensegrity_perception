@@ -11,13 +11,16 @@ import numpy.linalg as la
 import cv2
 import networkx as nx
 import open3d as o3d
+from pyrender.constants import RenderFlags
+from pyrender.renderer import Renderer
 from scipy.optimize import minimize
 from matplotlib import pyplot as plt
 from tqdm import tqdm
 import trimesh
 import pyrender
 import torch
-from lietorch import SO3, SE3  # https://github.com/princeton-vl/lietorch
+from torch.optim import SGD
+from lietorch import SO3, SE3, LieGroupParameter  # https://github.com/princeton-vl/lietorch
 
 import perception_utils
 
@@ -186,8 +189,8 @@ class Tracker:
         complete_obs_color[complete_obs_mask] = color_im[complete_obs_mask]
         complete_obs_depth[complete_obs_mask] = depth_im[complete_obs_mask]
 
-        self.constrained_optimization(info, balance_factor=0.8)
-        self.rigid_finetune(complete_obs_depth)
+        # self.constrained_optimization(info, balance_factor=0.8)
+        # self.rigid_finetune(complete_obs_depth)
 
         if visualize:
             _, axes = plt.subplots(1, 3)
@@ -208,47 +211,6 @@ class Tracker:
         self.initialized = True
 
 
-    def update(self, color_im, depth_im, info):
-        assert self.initialized, "[Error] You must first initialize the tracker!"
-
-        color_im_hsv = cv2.cvtColor(color_im, cv2.COLOR_RGB2HSV)
-        H, W, _ = color_im_hsv.shape
-
-        complete_obs_mask = np.zeros((H, W), dtype=np.bool8)
-        for color, (u, v) in self.data_cfg['color_to_rod'].items():
-            prev_pose = self.G.edges[u, v]['pose_list'][-1].copy()
-            obs_depth_im = np.zeros_like(depth_im)
-
-            hsv_mask = cv2.inRange(color_im_hsv,
-                                   lowerb=tuple(self.data_cfg['hsv_ranges'][color][0]),
-                                   upperb=tuple(self.data_cfg['hsv_ranges'][color][1])).astype(np.bool8)
-            if color == 'red':
-                hsv_mask |= cv2.inRange(color_im_hsv, lowerb=(0, 150, 50), upperb=(20, 255, 255)).astype(np.bool8)
-
-            obs_depth_im[hsv_mask] = depth_im[hsv_mask]
-            complete_obs_mask |= hsv_mask
-
-            mesh_node = pyrender.Node(name='mesh', mesh=self.rod_mesh, matrix=np.eye(4))
-            rod_pose = self.projective_icp_cuda(obs_depth_im, [mesh_node], [prev_pose], max_iter=30, max_distance=0.02,
-                                                early_stop_thresh=0.0015, verbose=False)[0]
-            self.G.edges[u, v]['pose_list'].append(rod_pose)
-            self.G.nodes[u]['pos_list'].append(rod_pose[:3, 3] + rod_pose[:3, 2] * self.rod_length / 2)
-            self.G.nodes[v]['pos_list'].append(rod_pose[:3, 3] - rod_pose[:3, 2] * self.rod_length / 2)
-
-        # complete_obs_mask = self.track_with_rgbd(color_im, depth_im)
-
-        # self.constrained_optimization(info, balance_factor=0.3)
-
-        # complete_obs_color = np.zeros_like(color_im)
-        # complete_obs_depth = np.zeros_like(depth_im)
-        # complete_obs_color[complete_obs_mask] = color_im[complete_obs_mask]
-        # complete_obs_depth[complete_obs_mask] = depth_im[complete_obs_mask]
-
-        # self.rigid_finetune(complete_obs_depth)
-
-        # return complete_obs_color, complete_obs_depth
-
-
     def estimate_rod_pose_from_end_cap_centers(self, curr_end_cap_centers, prev_rod_pose=None):
         curr_rod_pos = (curr_end_cap_centers[0] + curr_end_cap_centers[1]) / 2
         curr_z_dir = curr_end_cap_centers[0] - curr_end_cap_centers[1]
@@ -266,6 +228,135 @@ class Tracker:
         curr_rod_pose[:3, :3] = delta_rot @ prev_rot
         curr_rod_pose[:3, 3] = curr_rod_pos
         return curr_rod_pose
+
+
+    def update(self, color_im, depth_im, info):
+        assert self.initialized, "[Error] You must first initialize the tracker!"
+
+        cam_intr = np.asarray(self.data_cfg['cam_intr'])
+        fx = cam_intr[0, 0]
+        fy = cam_intr[1, 1]
+        cx = cam_intr[0, 2]
+        cy = cam_intr[1, 2]
+        cam_extr = np.asarray(self.data_cfg['cam_extr'])
+
+        color_im_hsv = cv2.cvtColor(color_im, cv2.COLOR_RGB2HSV)
+        depth_im_gpu = torch.from_numpy(depth_im).cuda()
+
+        # get observed pts for each node (end cap)
+        for color, (u, v) in self.data_cfg['color_to_rod'].items():
+            hsv_mask = cv2.inRange(color_im_hsv,
+                                   lowerb=tuple(self.data_cfg['hsv_ranges'][color][0]),
+                                   upperb=tuple(self.data_cfg['hsv_ranges'][color][1])).astype(np.bool8)
+            if color == 'red':
+                hsv_mask |= cv2.inRange(color_im_hsv, lowerb=(0, 150, 50), upperb=(20, 255, 255)).astype(np.bool8)
+
+            hsv_mask_gpu = torch.from_numpy(hsv_mask).cuda()
+            indices = torch.nonzero(hsv_mask_gpu)
+            ys = indices[:, 0]
+            xs = indices[:, 1]
+            Z_obs = depth_im_gpu[ys, xs]
+            X_obs = (xs - cx) / fx * Z_obs
+            Y_obs = (ys - cy) / fy * Z_obs
+            pts_obs = torch.stack([X_obs, Y_obs, Z_obs]).T  # (N, 3)
+
+            # crop observation
+            r = 0.03
+            for node in (u, v):
+                prev_pos_world = self.G.nodes[node]['pos_list'][-1]
+                prev_pos_cam = cam_extr[:3, :3] @ prev_pos_world + cam_extr[:3, 3]
+
+                X_prev, Y_prev, Z_prev = prev_pos_cam
+                pos_mask = (X_obs > X_prev - r) & (X_obs < X_prev + r) & \
+                           (Y_obs > Y_prev - r) & (Y_obs < Y_prev + r) & \
+                           (Z_obs > Z_prev - r) & (Z_obs < Z_prev + r)
+                self.G.nodes[node]['obs_pts'] = pts_obs[pos_mask]
+
+        camera = pyrender.IntrinsicsCamera(fx=fx, fy=fy, cx=cx, cy=cy)
+        light = pyrender.SpotLight(color=np.ones(3), intensity=3.0, innerConeAngle=np.pi/16.0)
+        camera_node = pyrender.Node(name='cam', camera=camera, matrix=np.eye(4))
+        light_node = pyrender.Node(name='light', light=light, matrix=np.eye(4))
+        scene = pyrender.Scene(nodes=[camera_node, light_node])
+
+        # convert to anti-human opengl coordinates
+        m = np.array([
+            [1, 0, 0, 0],
+            [0, -1, 0, 0],
+            [0, 0, -1, 0],
+            [0, 0, 0, 1]
+        ])
+
+        color_map = {'red': 1, 'green': 2, 'blue': 3}
+        seg_node_map = dict()
+
+        max_iter=30
+        max_correspondence_distance = 0.03
+
+        tic = time.time()
+        for iter in range(max_iter):
+            for color, (u, v) in self.data_cfg['color_to_rod'].items():
+                init_pose = cam_extr @ self.G.edges[u, v]['pose_list'][-1]  # in camera frame
+                mesh_node = pyrender.Node(name=f'{color}-mesh', mesh=self.rod_mesh, matrix=m @ init_pose)
+                scene.add_node(mesh_node)
+                seg_node_map[mesh_node] = color_map[color]
+
+            seg_im, rendered_depth_im = self.renderer.render(scene, flags=RenderFlags.SEG, seg_node_map=seg_node_map)
+            seg_im = torch.from_numpy(np.ascontiguousarray(seg_im[:, :, 0])).cuda()
+            rendered_depth_im = torch.from_numpy(rendered_depth_im).cuda()
+
+            node_to_pq = dict()
+            for idx, (color, (u, v)) in enumerate(self.data_cfg['color_to_rod'].items()):
+                indices = torch.nonzero((rendered_depth_im > 0) & (seg_im == color_map[color]))
+                r_ys = indices[:, 0]
+                r_xs = indices[:, 1]
+                Z_est = rendered_depth_im[r_ys, r_xs]
+                X_est = (r_xs - cx) / fx * Z_est
+                Y_est = (r_ys - cy) / fy * Z_est
+                rod_pts_est = torch.stack([X_est, Y_est, Z_est]).T  # (M, 3)
+
+                for node in (u, v):
+                    prev_pos_world = self.G.nodes[node]['pos_list'][-1]
+                    prev_pos_cam = cam_extr[:3, :3] @ prev_pos_world + cam_extr[:3, 3]
+
+                    X_prev, Y_prev, Z_prev = prev_pos_cam
+                    node_pos_mask = (X_est > X_prev - r) & (X_est < X_prev + r) & \
+                                    (Y_est > Y_prev - r) & (Y_est < Y_prev + r) & \
+                                    (Z_est > Z_prev - r) & (Z_est < Z_prev + r)
+                    node_pts_est = rod_pts_est[node_pos_mask]
+                    node_pts_obs = self.G.nodes[node]['obs_pts']
+
+                    distances = torch.norm(node_pts_obs.unsqueeze(1) - node_pts_est.unsqueeze(0), dim=2)  # (N, M)
+                    closest_distance, closest_indices = torch.min(distances, axis=1)
+                    dist_mask = closest_distance < max_correspondence_distance
+
+                    Q = node_pts_obs[dist_mask]  # (K, 3)
+                    P = node_pts_est[closest_indices][dist_mask]  # (K, 3)
+
+                    node_to_pq[node] = (P, Q)
+
+            # optimize use SGD
+            num_rod = len(self.data_cfg['color_to_rod'])
+            delta_T = torch.zeros((num_rod, 7), device='cuda')  # [[x, y, z, wx, wy, wz, ww]]
+            delta_T[:, 6] = 1
+            delta_T.requires_grad = True
+            delta_T = SE3.InitFromVec(delta_T)
+            delta_T = LieGroupParameter(delta_T)
+            optimizer = SGD([delta_T], lr=0.001, momentum=0.9)
+
+            n_steps = 10
+            for _ in range(n_steps):
+                loss = 0
+                optimizer.zero_grad()
+                for idx, (color, (u, v)) in enumerate(self.data_cfg['color_to_rod'].items()):
+                    for node in (u, v):
+                        P, Q = node_to_pq[node]
+                        loss += torch.mean(torch.norm(Q - delta_T[idx, None] * P, dim=1))
+                loss.backward()
+                optimizer.step()
+
+            break
+
+        exit(0)
 
 
     def projective_icp_cuda(self, depth_im, mesh_nodes, init_poses, max_iter=30, max_distance=0.02,
