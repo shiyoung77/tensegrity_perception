@@ -240,6 +240,9 @@ class Tracker:
         cy = cam_intr[1, 2]
         cam_extr = np.asarray(self.data_cfg['cam_extr'])
 
+        sensor_measurement = info['sensors']
+        sensor_status = info["sensor_status"]
+
         color_im_hsv = cv2.cvtColor(color_im, cv2.COLOR_RGB2HSV)
         depth_im_gpu = torch.from_numpy(depth_im).cuda()
 
@@ -267,9 +270,9 @@ class Tracker:
                 prev_pos_cam = cam_extr[:3, :3] @ prev_pos_world + cam_extr[:3, 3]
 
                 X_prev, Y_prev, Z_prev = prev_pos_cam
-                pos_mask = (X_obs > X_prev - r) & (X_obs < X_prev + r) & \
-                           (Y_obs > Y_prev - r) & (Y_obs < Y_prev + r) & \
-                           (Z_obs > Z_prev - r) & (Z_obs < Z_prev + r)
+                pos_mask = (torch.abs(X_obs - X_prev) < r) & \
+                           (torch.abs(Y_obs - Y_prev) < r) & \
+                           (torch.abs(Z_obs - Z_prev) < r)
                 self.G.nodes[node]['obs_pts'] = pts_obs[pos_mask]
 
         camera = pyrender.IntrinsicsCamera(fx=fx, fy=fy, cx=cx, cy=cy)
@@ -278,7 +281,7 @@ class Tracker:
         light_node = pyrender.Node(name='light', light=light, matrix=np.eye(4))
         scene = pyrender.Scene(nodes=[camera_node, light_node])
 
-        # convert to anti-human opengl coordinates
+        # convert to anti-human OpenGL coordinates  (the camera z-axis is pointing AWAY from the target)
         m = np.array([
             [1, 0, 0, 0],
             [0, -1, 0, 0],
@@ -289,10 +292,17 @@ class Tracker:
         color_map = {'red': 1, 'green': 2, 'blue': 3}
         seg_node_map = dict()
 
-        max_iter=30
+        max_iter=3
         max_correspondence_distance = 0.03
 
-        tic = time.time()
+        mesh_nodes = []
+        init_poses = []
+        for color, (u, v) in self.data_cfg['color_to_rod'].items():
+            mesh_node = pyrender.Node(name=f'{color}-mesh', mesh=self.rod_mesh, matrix=np.eye(4))
+            prev_rod_pose = self.G.edges[u, v]['pose_list'][-1]
+            mesh_nodes.append(mesh_node)
+            init_poses.append(prev_rod_pose)
+
         for iter in range(max_iter):
             for color, (u, v) in self.data_cfg['color_to_rod'].items():
                 init_pose = cam_extr @ self.G.edges[u, v]['pose_list'][-1]  # in camera frame
@@ -305,6 +315,8 @@ class Tracker:
             rendered_depth_im = torch.from_numpy(rendered_depth_im).cuda()
 
             node_to_pq = dict()
+            node_to_prev_pos = dict()
+
             for idx, (color, (u, v)) in enumerate(self.data_cfg['color_to_rod'].items()):
                 indices = torch.nonzero((rendered_depth_im > 0) & (seg_im == color_map[color]))
                 r_ys = indices[:, 0]
@@ -317,12 +329,14 @@ class Tracker:
                 for node in (u, v):
                     prev_pos_world = self.G.nodes[node]['pos_list'][-1]
                     prev_pos_cam = cam_extr[:3, :3] @ prev_pos_world + cam_extr[:3, 3]
+                    node_to_prev_pos[node] = torch.tensor(prev_pos_cam, dtype=torch.float32, device='cuda')
 
                     X_prev, Y_prev, Z_prev = prev_pos_cam
-                    node_pos_mask = (X_est > X_prev - r) & (X_est < X_prev + r) & \
-                                    (Y_est > Y_prev - r) & (Y_est < Y_prev + r) & \
-                                    (Z_est > Z_prev - r) & (Z_est < Z_prev + r)
+                    node_pos_mask = (torch.abs(X_est - X_prev) < r) & \
+                                    (torch.abs(Y_est - Y_prev) < r) & \
+                                    (torch.abs(Z_est - Z_prev) < r)
                     node_pts_est = rod_pts_est[node_pos_mask]
+                    # node_pts_est = rod_pts_est
                     node_pts_obs = self.G.nodes[node]['obs_pts']
 
                     distances = torch.norm(node_pts_obs.unsqueeze(1) - node_pts_est.unsqueeze(0), dim=2)  # (N, M)
@@ -341,22 +355,51 @@ class Tracker:
             delta_T.requires_grad = True
             delta_T = SE3.InitFromVec(delta_T)
             delta_T = LieGroupParameter(delta_T)
-            optimizer = SGD([delta_T], lr=0.001, momentum=0.9)
+            optimizer = SGD([delta_T], lr=0.001, momentum=0.5)
 
-            n_steps = 10
-            for _ in range(n_steps):
+            n_steps = 20
+            for step in range(n_steps):
                 loss = 0
                 optimizer.zero_grad()
+
+                # update end cap positions
+                node_to_pos = dict()
+                for idx, (color, (u, v)) in enumerate(self.data_cfg['color_to_rod'].items()):
+                    for node in (u, v):
+                        node_to_pos[node] = delta_T[idx] * node_to_prev_pos[node]
+
+                # unary loss
                 for idx, (color, (u, v)) in enumerate(self.data_cfg['color_to_rod'].items()):
                     for node in (u, v):
                         P, Q = node_to_pq[node]
-                        loss += torch.mean(torch.norm(Q - delta_T[idx, None] * P, dim=1))
+                        # loss += torch.sum((Q - delta_T[idx, None] * P)**2)
+                        loss += torch.mean(torch.sum((Q - delta_T[idx, None] * P)**2, dim=1))
+
+                # binary loss
+                for sensor_id, (u, v) in self.data_cfg['sensor_to_tendon'].items():
+                    if not sensor_status[sensor_id]:  # sensor is broken
+                        continue
+
+                    u_pos = node_to_pos[u]
+                    v_pos = node_to_pos[v]
+                    estimated_L = torch.norm(u_pos - v_pos)
+                    measured_L = sensor_measurement[str(sensor_id)]['length'] / 100
+                    loss += (estimated_L - measured_L)**2
+
+                if step == 0:
+                    print(loss)
+                elif step == n_steps - 1:
+                    print(loss)
+
                 loss.backward()
                 optimizer.step()
 
-            break
-
-        exit(0)
+            for idx, (color, (u, v)) in enumerate(self.data_cfg['color_to_rod'].items()):
+                init_pose = cam_extr @ self.G.edges[u, v]['pose_list'][-1]  # in camera frame
+                optimized_pose = la.inv(cam_extr) @ delta_T[idx].matrix().detach().cpu().numpy() @ init_pose
+                self.G.edges[u, v]['pose_list'].append(optimized_pose)
+                self.G.nodes[u]['pos_list'].append(optimized_pose[:3, 3] + optimized_pose[:3, 2] * self.rod_length / 2)
+                self.G.nodes[v]['pos_list'].append(optimized_pose[:3, 3] - optimized_pose[:3, 2] * self.rod_length / 2)
 
 
     def projective_icp_cuda(self, depth_im, mesh_nodes, init_poses, max_iter=30, max_distance=0.02,
@@ -550,7 +593,8 @@ if __name__ == '__main__':
         info['sensor_status'] = {key: True for key in info['sensors'].keys()}
         # info['sensor_status']['2'] = False
 
-        complete_obs_color, complete_obs_depth = tracker.update(color_im, depth_im, info)
+        tracker.update(color_im, depth_im, info)
+        # complete_obs_color, complete_obs_depth = tracker.update(color_im, depth_im, info)
         # complete_obs_bgr = cv2.cvtColor(complete_obs_color, cv2.COLOR_RGB2BGR)
         # complete_obs_bgr[complete_obs_depth == 0] = 0
         # cv2.imwrite(os.path.join(video_path, 'observation', f"{idx:04d}.png"), complete_obs_bgr)
