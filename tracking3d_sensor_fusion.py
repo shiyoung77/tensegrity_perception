@@ -153,7 +153,7 @@ class Tracker:
                 mask2 = np.all((points_hsv - self.data_cfg['hsv_ranges'][color][1]) <= 0, axis=1)
 
                 if color == 'red':
-                    mask3 = np.all((points_hsv - np.array([0, 150, 50])) >= 0, axis=1)
+                    mask3 = np.all((points_hsv - np.array([0, 50, 50])) >= 0, axis=1)
                     mask4 = np.all((points_hsv - np.array([20, 255, 255])) <= 0, axis=1)
                     valid_indices = np.where((mask1 & mask2) | (mask3 & mask4))[0]
                 else:
@@ -253,6 +253,41 @@ class Tracker:
         visualizer.poll_events()
         visualizer.update_renderer()
 
+    def compute_mc2cam_mat(self, info):
+        cap_end_pos = list()
+        num_end_caps = 2 * self.data_cfg['num_rods']
+        for i in range(num_end_caps):
+            cap_end_pos.append(np.concatenate([self.G.nodes[i]['pos_list'][-1], [1.]]))
+        extr_mat = self.data_cfg['cam_extr']
+        cap_end_pos_in_cam_f = np.matmul(extr_mat, np.array(cap_end_pos).T)  # 4x6
+        cap_end_pos_in_mc_f = list()
+        mask_ids = list()
+        for i in range(num_end_caps):
+            pos = info['mocap'][str(i)]
+            if pos is None:
+                continue
+            mask_ids.append(i)
+            cap_end_pos_in_mc_f.append([pos['x']/1000., pos['y']/1000., pos['z']/1000.])
+        cap_end_pos_in_mc_f = np.array(cap_end_pos_in_mc_f).T  # 3x6
+        cap_end_pos_in_cam_f = cap_end_pos_in_cam_f[:, mask_ids]
+        P = cap_end_pos_in_cam_f[:3]
+        Q = cap_end_pos_in_mc_f
+        P_mean = P.mean(1, keepdims=True)  # (3, 1)
+        Q_mean = Q.mean(1, keepdims=True)  # (3, 1)
+
+        H = (Q - Q_mean) @ (P - P_mean).T
+        U, D, V = la.svd(H)
+        R = U @ V.T
+        t = Q_mean - R @ P_mean
+
+        error_after = np.mean(la.norm(Q - (R @ P + t), axis=0))
+
+        cam2mc_mat = np.zeros((4, 4))
+        cam2mc_mat[0:3, 0:3] = R
+        cam2mc_mat[0:3, 3] = t.squeeze()
+        print(cam2mc_mat)
+        return cam2mc_mat
+
 
     def track_with_rgbd(self, scene_pcd_hsv):
         complete_obs_pcd = o3d.geometry.PointCloud()
@@ -278,7 +313,7 @@ class Tracker:
                 mask1 = np.all((points_hsv - self.data_cfg['hsv_ranges'][color][0]) >= 0, axis=1)
                 mask2 = np.all((points_hsv - self.data_cfg['hsv_ranges'][color][1]) <= 0, axis=1)
                 if color == 'red':
-                    mask3 = np.all((points_hsv - np.array([0, 100, 50])) >= 0, axis=1)
+                    mask3 = np.all((points_hsv - np.array([0, 50, 50])) >= 0, axis=1)
                     mask4 = np.all((points_hsv - np.array([20, 255, 255])) <= 0, axis=1)
                     valid_indices = np.where((mask1 & mask2) | (mask3 & mask4))[0]
                 else:
@@ -459,10 +494,12 @@ if __name__ == '__main__':
     parser.add_argument("--dataset", default="dataset")
     # parser.add_argument("--video_id", default="fabric2")
     # parser.add_argument("--video_id", default="six_cameras10")
-    parser.add_argument("--video_id", default="crawling_sim")
+    # parser.add_argument("--video_id", default="crawling_sim")
+    parser.add_argument("--video_id", default="socks6")
     parser.add_argument("--rod_mesh_file", default="pcd/yale/untethered_rod_w_end_cap.ply")
     parser.add_argument("--rod_pcd_file", default="pcd/yale/untethered_rod_w_end_cap.pcd")
-    parser.add_argument("--first_frame_id", default=0, type=int)
+    # parser.add_argument("--first_frame_id", default=0, type=int)
+    parser.add_argument("--first_frame_id", default=50, type=int)
     parser.add_argument("-v", "--visualize", default=True, action="store_true")
     args = parser.parse_args()
 
@@ -533,6 +570,8 @@ if __name__ == '__main__':
 
         robot_cloud, scene_pcd = tracker.update(color_im, depth_im, info)
         estimation_cloud = robot_cloud + scene_pcd
+
+        tracker.compute_mc2cam_mat(info)
 
         if args.visualize:
             tracker.visualize(robot_cloud, scene_pcd, visualizer)
