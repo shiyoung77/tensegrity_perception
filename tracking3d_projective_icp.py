@@ -218,7 +218,7 @@ class Tracker:
         complete_obs_color[complete_obs_mask] = color_im[complete_obs_mask]
         complete_obs_depth[complete_obs_mask] = depth_im[complete_obs_mask]
 
-        self.constrained_optimization(info, balance_factor=0.9)
+        self.constrained_optimization(info)
         # self.rigid_finetune(complete_obs_depth)
 
         if visualize:
@@ -246,7 +246,7 @@ class Tracker:
 
         complete_obs_mask = self.track_with_rgbd(color_im, depth_im)
 
-        self.constrained_optimization(info, balance_factor=0.8)
+        self.constrained_optimization(info)
 
         complete_obs_color = np.zeros_like(color_im)
         complete_obs_depth = np.zeros_like(depth_im)
@@ -291,8 +291,46 @@ class Tracker:
         print(cam2mc_mat)
         return cam2mc_mat
 
-    def compute_matched_pts(obs_depth_im, rendered_depth_im):
-        pass
+    def compute_confidence(self, obs_depth_im, rendered_depth_im, rendered_seg_im, inlier_thresh=0.01):
+        seg_gpu = torch.from_numpy(rendered_seg_im).cuda()
+        obs_depth_gpu = torch.from_numpy(obs_depth_im).cuda()
+        rendered_depth_gpu = torch.from_numpy(rendered_depth_im).cuda()
+
+        cam_intr = np.asarray(self.data_cfg['cam_intr'])
+        fx = cam_intr[0, 0]
+        fy = cam_intr[1, 1]
+        cx = cam_intr[0, 2]
+        cy = cam_intr[1, 2]
+
+        indices = torch.nonzero(obs_depth_gpu > 0)
+        ys, xs = indices[:, 0], indices[:, 1]
+        Z_obs = obs_depth_gpu[ys, xs]
+        X_obs = (xs - cx) / fx * Z_obs
+        Y_obs = (ys - cy) / fy * Z_obs
+        pts_obs = torch.stack([X_obs, Y_obs, Z_obs]).T  # (N, 3)
+
+        indices = np.nonzero(rendered_depth_gpu > 0)
+        r_ys = indices[:, 0]
+        r_xs = indices[:, 1]
+        Z_est = rendered_depth_gpu[r_ys, r_xs]
+        X_est = (r_xs - cx) / fx * Z_est
+        Y_est = (r_ys - cy) / fy * Z_est
+        pts_est = torch.stack([X_est, Y_est, Z_est]).T  # (M, 3)
+
+        pts_labels = seg_gpu[r_ys, r_xs]
+        rendered_u = torch.sum(pts_labels == 1).cpu().item()
+        rendered_v = torch.sum(pts_labels == 2).cpu().item()
+
+        # nearest neighbor data association
+        distances = torch.norm(pts_est.unsqueeze(1) - pts_obs.unsqueeze(0), dim=2)  # (N, M)
+        closest_distance, closest_indices = torch.min(distances, dim=1)
+        dist_mask = closest_distance < inlier_thresh
+
+        # get inlier labels
+        matched_labels = pts_labels[dist_mask]
+        matched_u = torch.sum(matched_labels == 1).cpu().item()
+        matched_v = torch.sum(matched_labels == 2).cpu().item()
+        return matched_u / rendered_u, matched_v / rendered_v
 
     def track_with_rgbd(self, color_im, depth_im):
         color_im_hsv = cv2.cvtColor(color_im, cv2.COLOR_RGB2HSV)
@@ -320,9 +358,10 @@ class Tracker:
                 x_min, x_max = center_x - 40, center_x + 40
                 y_min, y_max = center_y - 40, center_y + 40
                 cv2.rectangle(vis, (x_min, y_min), (x_max, y_max), color=(255, 0, 0))
+                cv2.putText(vis, str(node), (x_min, y_min), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 255), 2, cv2.LINE_AA)
 
-                xs, ys = np.nonzero(hsv_mask[y_min:y_max, x_min:x_max])
-                num_obs_pixels = xs.shape[0]
+                ys, xs = np.nonzero(hsv_mask[y_min:y_max, x_min:x_max])
+                num_obs_pixels = ys.shape[0]
                 self.G.nodes[node]['num_obs_pixels'] = num_obs_pixels
 
                 if num_obs_pixels < 50:
@@ -341,6 +380,10 @@ class Tracker:
             rod_pose, rendered_depth, rendered_seg = self.projective_icp_cuda(
                 aug_obs_depth_im, mesh_nodes, init_poses, max_iter=30, max_distance=0.1, early_stop_thresh=0.001)
             rod_pose = la.inv(self.data_cfg['cam_extr']) @ rod_pose[0]
+            confidence_u, confidence_v = self.compute_confidence(obs_depth_im, rendered_depth, rendered_seg,
+                                                                 inlier_thresh=0.05)
+            print(f"color: {color}, node {u} confidence: {confidence_u}")
+            print(f"color: {color}, node {v} confidence: {confidence_v}")
 
             self.G.edges[u, v]['pose_list'].append(rod_pose)
             self.G.edges[u, v]['rendered_depth'] = rendered_depth
@@ -348,6 +391,8 @@ class Tracker:
             self.G.nodes[v]['pos_list'].append(rod_pose[:3, 3] - rod_pose[:3, 2] * self.rod_length / 2)
             self.G.nodes[u]['pos_2d'], self.G.nodes[u]['roi_2d'] = self.get_end_cap_roi(u, radius=0.03)
             self.G.nodes[v]['pos_2d'], self.G.nodes[v]['roi_2d'] = self.get_end_cap_roi(v, radius=0.03)
+            self.G.nodes[u]['confidence'] = confidence_u
+            self.G.nodes[v]['confidence'] = confidence_v
 
             if color == 'green':
                 vis[rendered_depth > 0] = [0, 255, 0]
@@ -361,13 +406,13 @@ class Tracker:
 
         return complete_obs_mask
 
-    def constrained_optimization(self, info, balance_factor=0.8):
+    def constrained_optimization(self, info):
         rod_length = self.data_cfg['rod_length']
         num_end_caps = 2 * self.data_cfg['num_rods']  # a rod has two end caps
 
         sensor_measurement = info['sensors']
         sensor_status = info['sensor_status']
-        obj_func = self.objective_function_generator(sensor_measurement, sensor_status, balance_factor=balance_factor)
+        obj_func = self.objective_function_generator(sensor_measurement, sensor_status)
 
         init_values = np.zeros(3 * num_end_caps)
         for i in range(num_end_caps):
@@ -397,23 +442,19 @@ class Tracker:
             optimized_pose = self.estimate_rod_pose_from_end_cap_centers(curr_end_cap_centers, prev_rod_pose)
             self.G.edges[u, v]['pose_list'][-1] = optimized_pose
 
-    def objective_function_generator(self, sensor_measurement, sensor_status, balance_factor=0.5):
+    def objective_function_generator(self, sensor_measurement, sensor_status):
 
         def objective_function(X):
-            balance_factor = {key : 1 for key in self.G.nodes}
-
             unary_loss = 0
             for i in range(len(self.data_cfg['node_to_color'])):
-                if 'num_obs_pts' in self.G.nodes[i]:
-                    if self.G.nodes[i]['num_obs_pts'] == 0:
-                        balance_factor[i] = 0
-                    elif self.G.nodes[i]['num_obs_pts'] < 50:
-                        balance_factor[i] = 0
-                        # factor = self.G.nodes[i]['num_obs_pts'] / 50
-
                 pos = X[(3 * i):(3 * i + 3)]
                 estimated_pos = self.G.nodes[i]['pos_list'][-1]
-                unary_loss += balance_factor[i] * np.sum((pos - estimated_pos)**2)
+                confidence = self.G.nodes[i].get('confidence', 1)
+                if confidence > 0.2:
+                    confidence = 1
+                elif confidence < 0.2:
+                    confidence = 0.2
+                unary_loss += confidence * np.sum((pos - estimated_pos)**2)
 
             binary_loss = 0
             for sensor_id, (u, v) in self.data_cfg['sensor_to_tendon'].items():
@@ -428,7 +469,6 @@ class Tracker:
                 binary_loss += (estimated_length - measured_length)**2
 
             return unary_loss + binary_loss
-            # return balance_factor * unary_loss + (1 - balance_factor) * binary_loss
 
         return objective_function
 
@@ -541,7 +581,8 @@ class Tracker:
         Y_obs = (ys - cy) / fy * Z_obs
         pts_obs = torch.stack([X_obs, Y_obs, Z_obs]).T  # (N, 3)
 
-        T_list = init_poses
+        T_list = [pose.copy() for pose in init_poses]
+
         for _ in range(max_iter):
             for mesh_node, T in zip(mesh_nodes, T_list):
                 scene.set_pose(mesh_node, m @ T)
@@ -733,12 +774,6 @@ if __name__ == '__main__':
         # tracker.compute_mc2cam_mat(info)
 
         if args.visualize:
-            cv2.imshow("observation", color_im_bgr)
-            # cv2.imshow("filtered_observation", complete_obs_bgr)
-            key = cv2.waitKey(0)
-            if key == ord('q'):
-                exit(0)
-
             scene_pcd = perception_utils.create_pcd(depth_im, data_cfg['cam_intr'], color_im,
                                                     depth_trunc=data_cfg['depth_trunc'],
                                                     cam_extr=data_cfg['cam_extr'])
@@ -755,6 +790,12 @@ if __name__ == '__main__':
             visualize(data_cfg, estimation_cloud, visualizer)
             # visualizer.capture_screen_image(os.path.join(video_path, "raw_estimation", f"{idx:04d}.png"))
             # o3d.io.write_point_cloud(os.path.join(video_path, "estimation_cloud", f"{idx:04d}.ply"), estimation_cloud)
+
+            cv2.imshow("observation", color_im_bgr)
+            # cv2.imshow("filtered_observation", complete_obs_bgr)
+            key = cv2.waitKey(0)
+            if key == ord('q'):
+                exit(0)
 
     # save rod poses and end cap positions to file
     pose_output_folder = os.path.join(video_path, "poses")
