@@ -28,12 +28,12 @@ class Tracker:
         "blue": [0, 0, 255]
     }
 
-    def __init__(self, data_cfg, rod_pcd=None, rod_mesh=None):
+    def __init__(self, data_cfg, rod_pcd=None, end_cap_meshes=None):
         self.data_cfg = data_cfg
         pprint.pprint(self.data_cfg)
         self.initialized = False
 
-        self.rod_mesh = rod_mesh
+        self.end_cap_meshes = end_cap_meshes
         self.rod_pcd = copy.deepcopy(rod_pcd)
         self.rod_length = self.data_cfg['rod_length']
 
@@ -183,19 +183,42 @@ class Tracker:
             rod_pcd = rod_pcd.paint_uniform_color(np.array(Tracker.ColorDict[color]) / 255)
 
             # icp refinement
-            mesh_node = pyrender.Node(name='mesh', mesh=self.rod_mesh, matrix=np.eye(4))
-            rod_pose = self.projective_icp_cuda(obs_depth_im, [mesh_node], [init_pose], max_iter=30, max_distance=0.02,
-                                                early_stop_thresh=0.0015, verbose=False)[0]
+            mesh_nodes = [pyrender.Node(name='mesh', mesh=self.end_cap_meshes[0], matrix=np.eye(4)),
+                          pyrender.Node(name='mesh', mesh=self.end_cap_meshes[1], matrix=np.eye(4))]
+            init_poses = [init_pose.copy(), init_pose.copy()]
+            rod_pose, rendered_depth = self.projective_icp_cuda(obs_depth_im, mesh_nodes, init_poses, max_iter=30,
+                                                                max_distance=0.02, early_stop_thresh=0.0015,
+                                                                verbose=False)
+            rod_pose = rod_pose[0]
 
             self.G.edges[u, v]['pose_list'].append(rod_pose)
+            self.G.edges[u, v]['rendered_depth'] = rendered_depth
             self.G.nodes[u]['pos_list'].append(rod_pose[:3, 3] + rod_pose[:3, 2] * self.rod_length / 2)
             self.G.nodes[v]['pos_list'].append(rod_pose[:3, 3] - rod_pose[:3, 2] * self.rod_length / 2)
+            self.G.nodes[u]['pos_2d'], self.G.nodes[u]['roi_2d'] = self.get_end_cap_roi(u, radius=0.03)
+            self.G.nodes[v]['pos_2d'], self.G.nodes[v]['roi_2d'] = self.get_end_cap_roi(v, radius=0.03)
+
+        """
+        for color, (u, v) in self.data_cfg['color_to_rod'].items():
+            rendered_depth = self.G.edges[u, v]['rendered_depth']
+            vis = np.zeros_like(color_im)
+            vis[rendered_depth > 0] = [255, 255, 255]
+
+            cv2.rectangle(vis, (x_min, y_min), (x_max, y_max), color=(0, 0, 255))
+
+            x_min, y_min, x_max, y_max = self.get_end_cap_roi(v, radius=0.03)
+            cv2.rectangle(vis, (x_min, y_min), (x_max, y_max), color=(0, 0, 255))
+
+            plt.imshow(vis)
+            plt.show()
+        # exit(0)
+        """
 
         complete_obs_color[complete_obs_mask] = color_im[complete_obs_mask]
         complete_obs_depth[complete_obs_mask] = depth_im[complete_obs_mask]
 
-        self.constrained_optimization(info, balance_factor=0.8)
-        self.rigid_finetune(complete_obs_depth)
+        self.constrained_optimization(info, balance_factor=0.9)
+        # self.rigid_finetune(complete_obs_depth)
 
         if visualize:
             complete_obs_hsv = cv2.cvtColor(complete_obs_color, cv2.COLOR_RGB2HSV)
@@ -222,17 +245,16 @@ class Tracker:
 
         complete_obs_mask = self.track_with_rgbd(color_im, depth_im)
 
-        self.constrained_optimization(info, balance_factor=0.3)
+        self.constrained_optimization(info, balance_factor=0.8)
 
         complete_obs_color = np.zeros_like(color_im)
         complete_obs_depth = np.zeros_like(depth_im)
         complete_obs_color[complete_obs_mask] = color_im[complete_obs_mask]
         complete_obs_depth[complete_obs_mask] = depth_im[complete_obs_mask]
 
-        self.rigid_finetune(complete_obs_depth)
+        # self.rigid_finetune(complete_obs_depth)
 
         return complete_obs_color, complete_obs_depth
-
 
     def compute_mc2cam_mat(self, info):
         cap_end_pos = list()
@@ -251,6 +273,7 @@ class Tracker:
             cap_end_pos_in_mc_f.append([pos['x']/1000., pos['y']/1000., pos['z']/1000.])
         cap_end_pos_in_mc_f = np.array(cap_end_pos_in_mc_f).T  # 3x6
         cap_end_pos_in_cam_f = cap_end_pos_in_cam_f[:, mask_ids]
+
         P = cap_end_pos_in_cam_f[:3]
         Q = cap_end_pos_in_mc_f
         P_mean = P.mean(1, keepdims=True)  # (3, 1)
@@ -260,8 +283,6 @@ class Tracker:
         U, D, V = la.svd(H)
         R = U @ V.T
         t = Q_mean - R @ P_mean
-
-        error_after = np.mean(la.norm(Q - (R @ P + t), axis=0))
 
         cam2mc_mat = np.zeros((4, 4))
         cam2mc_mat[0:3, 0:3] = R
@@ -282,17 +303,55 @@ class Tracker:
                                    lowerb=tuple(self.data_cfg['hsv_ranges'][color][0]),
                                    upperb=tuple(self.data_cfg['hsv_ranges'][color][1])).astype(np.bool8)
             if color == 'red':
-                hsv_mask |= cv2.inRange(color_im_hsv, lowerb=(0, 50, 50), upperb=(20, 255, 255)).astype(np.bool8)
+                hsv_mask |= cv2.inRange(color_im_hsv, lowerb=(0, 80, 50), upperb=(15, 255, 255)).astype(np.bool8)
 
             obs_depth_im[hsv_mask] = depth_im[hsv_mask]
             complete_obs_mask |= hsv_mask
 
-            mesh_node = pyrender.Node(name='mesh', mesh=self.rod_mesh, matrix=np.eye(4))
-            rod_pose = self.projective_icp_cuda(obs_depth_im, [mesh_node], [prev_pose], max_iter=30, max_distance=0.02,
-                                                early_stop_thresh=0.0015, verbose=False)[0]
+            vis = np.zeros_like(color_im)
+            for node in (u, v):
+                center_x, center_y = self.G.nodes[node]['pos_2d']
+                x_min, x_max = center_x - 40, center_x + 40
+                y_min, y_max = center_y - 40, center_y + 40
+                cv2.rectangle(vis, (x_min, y_min), (x_max, y_max), color=(255, 0, 0))
+
+                xs, ys = np.nonzero(hsv_mask[y_min:y_max, x_min:x_max])
+                num_obs_pixels = xs.shape[0]
+                self.G.nodes[node]['num_obs_pixels'] = num_obs_pixels
+
+                if num_obs_pixels < 50:
+                    center_x, center_y = self.G.nodes[node]['pos_2d']
+                    x_min, x_max = center_x - 15, center_x + 15
+                    y_min, y_max = center_y - 15, center_y + 15
+                    prev_roi_depth = self.G.edges[u, v]['rendered_depth'][y_min:y_max, x_min:x_max]
+                    obs_depth_im[y_min:y_max, x_min:x_max] = prev_roi_depth
+                    cv2.rectangle(vis, (x_min, y_min), (x_max, y_max), color=(0, 0, 255))
+
+            vis[obs_depth_im > 0] = 255
+
+            mesh_nodes = [pyrender.Node(name='mesh', mesh=self.end_cap_meshes[0], matrix=np.eye(4)),
+                          pyrender.Node(name='mesh', mesh=self.end_cap_meshes[1], matrix=np.eye(4))]
+            init_poses = [prev_pose.copy(), prev_pose.copy()]
+            rod_pose, rendered_depth = self.projective_icp_cuda(obs_depth_im, mesh_nodes, init_poses, max_iter=30,
+                                                                max_distance=0.1, early_stop_thresh=0.001,
+                                                                verbose=False)
+            rod_pose = rod_pose[0]
             self.G.edges[u, v]['pose_list'].append(rod_pose)
+            self.G.edges[u, v]['rendered_depth'] = rendered_depth
             self.G.nodes[u]['pos_list'].append(rod_pose[:3, 3] + rod_pose[:3, 2] * self.rod_length / 2)
             self.G.nodes[v]['pos_list'].append(rod_pose[:3, 3] - rod_pose[:3, 2] * self.rod_length / 2)
+            self.G.nodes[u]['pos_2d'], self.G.nodes[u]['roi_2d'] = self.get_end_cap_roi(u, radius=0.03)
+            self.G.nodes[v]['pos_2d'], self.G.nodes[v]['roi_2d'] = self.get_end_cap_roi(v, radius=0.03)
+
+            if color == 'green':
+                vis[rendered_depth > 0] = [0, 255, 0]
+                cv2.imshow("green_obs", vis)
+            elif color == 'blue':
+                vis[rendered_depth > 0] = [255, 0, 0]
+                cv2.imshow("blue_obs", vis)
+            elif color == 'red':
+                vis[rendered_depth > 0] = [0, 0, 255]
+                cv2.imshow("red_obs", vis)
 
         return complete_obs_mask
 
@@ -303,7 +362,7 @@ class Tracker:
         sensor_measurement = info['sensors']
         sensor_status = info['sensor_status']
         obj_func = self.objective_function_generator(sensor_measurement, sensor_status, balance_factor=balance_factor)
-        # init end cap positions as init_values
+
         init_values = np.zeros(3 * num_end_caps)
         for i in range(num_end_caps):
             init_values[(3 * i):(3 * i + 3)] = self.G.nodes[i]['pos_list'][-1]
@@ -335,27 +394,42 @@ class Tracker:
     def objective_function_generator(self, sensor_measurement, sensor_status, balance_factor=0.5):
 
         def objective_function(X):
+            balance_factor = {key : 1 for key in self.G.nodes}
+
             unary_loss = 0
             for i in range(len(self.data_cfg['node_to_color'])):
+                if 'num_obs_pts' in self.G.nodes[i]:
+                    if self.G.nodes[i]['num_obs_pts'] == 0:
+                        balance_factor[i] = 0
+                    elif self.G.nodes[i]['num_obs_pts'] < 50:
+                        balance_factor[i] = 0
+                        # factor = self.G.nodes[i]['num_obs_pts'] / 50
+
                 pos = X[(3 * i):(3 * i + 3)]
                 estimated_pos = self.G.nodes[i]['pos_list'][-1]
-                unary_loss += np.sum((pos - estimated_pos) ** 2)
-                # unary_loss += la.norm(pos - estimated_pos)
+                unary_loss += balance_factor[i] * np.sum((pos - estimated_pos)**2)
 
             binary_loss = 0
             for sensor_id, (u, v) in self.data_cfg['sensor_to_tendon'].items():
-                if not sensor_status[str(sensor_id)] or int(sensor_id) >= 6 or sensor_measurement[str(sensor_id)][
-                    'length'] <= 0:  # sensor is broken
+                sensor_id = str(sensor_id)
+                if not sensor_status[sensor_id] or sensor_measurement[sensor_id]['length'] <= 0:
                     continue
 
                 u_pos = X[(3 * u):(3 * u + 3)]
                 v_pos = X[(3 * v):(3 * v + 3)]
                 estimated_length = la.norm(u_pos - v_pos)
-                measured_length = sensor_measurement[str(sensor_id)]['length'] / 100
-                binary_loss += (estimated_length - measured_length) ** 2
-                # binary_loss += np.abs(estimated_length - measured_length)
+                measured_length = sensor_measurement[sensor_id]['length'] / 100
+                factor = 1
+                # if balance_factor[u] == 1 and balance_factor[v] == 1:
+                #     factor = 0.2
+                # elif balance_factor[u] == 1 or balance_factor[v] == 1:
+                #     factor = 1
+                # else:
+                #     factor = 1
+                binary_loss += factor * (estimated_length - measured_length)**2
 
-            return balance_factor * unary_loss + (1 - balance_factor) * binary_loss
+            return unary_loss + binary_loss
+            # return balance_factor * unary_loss + (1 - balance_factor) * binary_loss
 
         return objective_function
 
@@ -365,7 +439,6 @@ class Tracker:
             u_pos = X[3 * u: 3 * u + 3]
             v_pos = X[3 * v: 3 * v + 3]
             return la.norm(u_pos - v_pos) - rod_length
-            # return (la.norm(u_pos - v_pos) - rod_length)**2
 
         return constraint_function
 
@@ -378,8 +451,8 @@ class Tracker:
             mesh_nodes.append(mesh_node)
             init_poses.append(prev_rod_pose)
 
-        finetuned_poses = self.projective_icp_cuda(complete_obs_depth, mesh_nodes, init_poses, max_iter=30,
-                                                   max_distance=0.02, early_stop_thresh=0.0015, verbose=False)
+        finetuned_poses, _ = self.projective_icp_cuda(complete_obs_depth, mesh_nodes, init_poses, max_iter=30,
+                                                      max_distance=0.02, early_stop_thresh=0.0015, verbose=False)
 
         for i, (u, v) in enumerate(self.data_cfg['color_to_rod'].values()):
             finetuned_pose = finetuned_poses[i]
@@ -404,6 +477,36 @@ class Tracker:
         curr_rod_pose[:3, :3] = delta_rot @ prev_rot
         curr_rod_pose[:3, 3] = curr_rod_pos
         return curr_rod_pose
+
+    def get_end_cap_roi(self, end_cap_id, radius=0.03):
+        pos_world = self.G.nodes[end_cap_id]['pos_list'][-1]
+        X, Y, Z = pos_world
+        pos_cam = self.data_cfg['cam_extr'] @ np.array([X, Y, Z, 1])
+        X, Y, Z = pos_cam[:3]
+
+        cam_intr = np.asarray(self.data_cfg['cam_intr'])
+        fx = cam_intr[0, 0]
+        fy = cam_intr[1, 1]
+        cx = cam_intr[0, 2]
+        cy = cam_intr[1, 2]
+
+        corner_pts = np.array([
+            [X, Y, Z, 1],
+            [X - radius, Y - radius, Z - radius, 1],
+            [X - radius, Y - radius, Z + radius, 1],
+            [X + radius, Y - radius, Z - radius, 1],
+            [X + radius, Y - radius, Z + radius, 1],
+            [X - radius, Y + radius, Z - radius, 1],
+            [X - radius, Y + radius, Z + radius, 1],
+            [X + radius, Y + radius, Z - radius, 1],
+            [X + radius, Y + radius, Z + radius, 1],
+        ])
+
+        xs = (fx * corner_pts[:, 0] / corner_pts[:, 2] + cx).astype(np.int32)
+        ys = (fy * corner_pts[:, 1] / corner_pts[:, 2] + cy).astype(np.int32)
+        x_min, x_max = np.min(xs), np.max(xs)
+        y_min, y_max = np.min(ys), np.max(ys)
+        return (xs[0], ys[0]), (x_min, y_min, x_max, y_max)
 
     def projective_icp_cuda(self, depth_im, mesh_nodes, init_poses, max_iter=30, max_distance=0.02,
                             early_stop_thresh=0.0015, verbose=False):
@@ -444,19 +547,18 @@ class Tracker:
             for mesh_node, T in zip(mesh_nodes, T_list):
                 scene.set_pose(mesh_node, m @ T)
             _, rendered_depth_im = self.renderer.render(scene)
-            rendered_depth_im = torch.from_numpy(rendered_depth_im).cuda()
+            rendered_depth_im_gpu = torch.from_numpy(rendered_depth_im).cuda()
 
-            indices = np.nonzero(rendered_depth_im > 0)
+            indices = np.nonzero(rendered_depth_im_gpu > 0)
             r_ys = indices[:, 0]
             r_xs = indices[:, 1]
-            Z_est = rendered_depth_im[r_ys, r_xs]
+            Z_est = rendered_depth_im_gpu[r_ys, r_xs]
             X_est = (r_xs - cx) / fx * Z_est
             Y_est = (r_ys - cy) / fy * Z_est
             pts_est = torch.stack([X_est, Y_est, Z_est]).T  # (M, 3)
 
             # nearest neighbor data association
             distances = torch.norm(pts_obs.unsqueeze(1) - pts_est.unsqueeze(0), dim=2)  # (N, M)
-            # print(distances.shape)
             closest_distance, closest_indices = torch.min(distances, dim=1)
             dist_mask = closest_distance < max_distance
 
@@ -491,7 +593,7 @@ class Tracker:
             if error_after < early_stop_thresh:
                 break
 
-        return [la.inv(cam_extr) @ T for T in T_list]
+        return [la.inv(cam_extr) @ T for T in T_list], rendered_depth_im
 
 
 def visualize(data_cfg, pcd, visualizer):
@@ -521,9 +623,11 @@ if __name__ == '__main__':
     # parser.add_argument("--video_id", default="six_cameras10")
     # parser.add_argument("--video_id", default="crawling_sim")
     parser.add_argument("--video_id", default="socks6")
-    parser.add_argument("--rod_mesh_file", default="pcd/yale/untethered_rod_w_end_cap.ply")
+    # parser.add_argument("--rod_mesh_file", default="pcd/yale/untethered_rod_w_end_cap.ply")
+    parser.add_argument("--rod_mesh_file", default="pcd/yale/end_cap_only_new.obj")
+    parser.add_argument("--top_end_cap_mesh_file", default="pcd/yale/end_cap_top.obj")
+    parser.add_argument("--bottom_end_cap_mesh_file", default="pcd/yale/end_cap_bottom.obj")
     parser.add_argument("--rod_pcd_file", default="pcd/yale/untethered_rod_w_end_cap.pcd")
-    # parser.add_argument("--first_frame_id", default=0, type=int)
     parser.add_argument("--first_frame_id", default=50, type=int)
     parser.add_argument("-v", "--visualize", default=True, action="store_true")
     args = parser.parse_args()
@@ -543,7 +647,7 @@ if __name__ == '__main__':
     else:
         print(f"read rod triangle mesh from {args.rod_mesh_file}")
         rod_mesh = o3d.io.read_triangle_mesh(args.rod_mesh_file)
-        rod_pcd = rod_mesh.sample_points_poisson_disk(5000)
+        rod_pcd = rod_mesh.sample_points_poisson_disk(3000)
         points = np.asarray(rod_pcd.points)
         offset = points.mean(0)
         points -= offset  # move point cloud center
@@ -553,11 +657,15 @@ if __name__ == '__main__':
         print(f"rod pcd file is generated and saved to {pcd_path}")
 
     # read rod triangle mesh
-    rod_fuze_mesh = trimesh.load(args.rod_mesh_file)
-    rod_fuze_mesh.apply_translation(-rod_fuze_mesh.centroid)
-    rod_fuze_mesh.apply_scale(1 / data_cfg['rod_scale'])
-    rod_mesh = pyrender.Mesh.from_trimesh(rod_fuze_mesh)
-    tracker = Tracker(data_cfg, rod_pcd, rod_mesh)
+    # rod_fuze_mesh = trimesh.load_mesh(args.rod_mesh_file)
+    # print(rod_fuze_mesh.centroid)
+    # rod_fuze_mesh.apply_translation(-rod_fuze_mesh.centroid)
+    # rod_fuze_mesh.apply_scale(1 / data_cfg['rod_scale'])
+    # rod_mesh = pyrender.Mesh.from_trimesh(rod_fuze_mesh)
+
+    top_end_cap_mesh = pyrender.Mesh.from_trimesh(trimesh.load_mesh(args.top_end_cap_mesh_file))
+    bottom_end_cap_mesh = pyrender.Mesh.from_trimesh(trimesh.load_mesh(args.bottom_end_cap_mesh_file))
+    tracker = Tracker(data_cfg, rod_pcd, [top_end_cap_mesh, bottom_end_cap_mesh])
 
     # initialize tracker with the first frame
     color_path = os.path.join(video_path, 'color', f'{prefixes[args.first_frame_id]}.png')
@@ -569,7 +677,9 @@ if __name__ == '__main__':
         info = json.load(f)
 
     info['sensor_status'] = {key: True for key in info['sensors'].keys()}
-    # info['sensor_status']['2'] = False
+    info['sensor_status']['6'] = False
+    info['sensor_status']['7'] = False
+    info['sensor_status']['8'] = False
 
     tracker.initialize(color_im, depth_im, info, visualize=args.visualize, compute_hsv=False)
     data_cfg_module.write_config(tracker.data_cfg)
@@ -583,6 +693,14 @@ if __name__ == '__main__':
     if args.visualize:
         visualizer = o3d.visualization.Visualizer()
         visualizer.create_window(width=data_cfg['im_w'], height=data_cfg['im_h'])
+        cv2.namedWindow("observation")
+        cv2.moveWindow("observation", 800, 100)
+        cv2.namedWindow("red_obs")
+        cv2.moveWindow("red_obs", 100, 600)
+        cv2.namedWindow("blue_obs")
+        cv2.moveWindow("blue_obs", 800, 600)
+        cv2.namedWindow("green_obs")
+        cv2.moveWindow("green_obs", 1500, 600)
 
     for idx in tqdm(range(args.first_frame_id + 1, len(prefixes))):
         prefix = prefixes[idx]
@@ -597,17 +715,23 @@ if __name__ == '__main__':
             info = json.load(f)
 
         info['sensor_status'] = {key: True for key in info['sensors'].keys()}
-        # info['sensor_status']['2'] = False
+        info['sensor_status']['6'] = False
+        info['sensor_status']['7'] = False
+        info['sensor_status']['8'] = False
 
-        complete_obs_color, complete_obs_depth = tracker.update(color_im, depth_im, info)
-        tracker.compute_mc2cam_mat(info)
-        # complete_obs_bgr = cv2.cvtColor(complete_obs_color, cv2.COLOR_RGB2BGR)
+        complete_obs_rgb, complete_obs_depth = tracker.update(color_im, depth_im, info)
+        # complete_obs_bgr = cv2.cvtColor(complete_obs_rgb, cv2.COLOR_RGB2BGR)
         # complete_obs_bgr[complete_obs_depth == 0] = 0
         # cv2.imwrite(os.path.join(video_path, 'observation', f"{idx:04d}.png"), complete_obs_bgr)
 
+        # tracker.compute_mc2cam_mat(info)
+
         if args.visualize:
             cv2.imshow("observation", color_im_bgr)
-            cv2.waitKey(1)
+            # cv2.imshow("filtered_observation", complete_obs_bgr)
+            key = cv2.waitKey(0)
+            if key == ord('q'):
+                exit(0)
 
             scene_pcd = perception_utils.create_pcd(depth_im, data_cfg['cam_intr'], color_im,
                                                     depth_trunc=data_cfg['depth_trunc'],
