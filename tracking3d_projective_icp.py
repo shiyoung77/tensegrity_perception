@@ -8,6 +8,7 @@ from argparse import ArgumentParser
 
 import numpy as np
 import numpy.linalg as la
+import torch
 import cv2
 import networkx as nx
 import open3d as o3d
@@ -16,7 +17,7 @@ from matplotlib import pyplot as plt
 from tqdm import tqdm
 import trimesh
 import pyrender
-import torch
+from pyrender.constants import RenderFlags
 
 import perception_utils
 
@@ -185,11 +186,11 @@ class Tracker:
             # icp refinement
             mesh_nodes = [pyrender.Node(name='mesh', mesh=self.end_cap_meshes[0], matrix=np.eye(4)),
                           pyrender.Node(name='mesh', mesh=self.end_cap_meshes[1], matrix=np.eye(4))]
-            init_poses = [init_pose.copy(), init_pose.copy()]
-            rod_pose, rendered_depth = self.projective_icp_cuda(obs_depth_im, mesh_nodes, init_poses, max_iter=30,
-                                                                max_distance=0.02, early_stop_thresh=0.0015,
-                                                                verbose=False)
-            rod_pose = rod_pose[0]
+            init_rod_pose_cam = self.data_cfg['cam_extr'] @ init_pose
+            init_poses = [init_rod_pose_cam, init_rod_pose_cam]
+            rod_pose, rendered_depth, rendered_seg = self.projective_icp_cuda(
+                obs_depth_im, mesh_nodes, init_poses, max_iter=30, max_distance=0.02, early_stop_thresh=0.0015)
+            rod_pose = la.inv(self.data_cfg['cam_extr']) @ rod_pose[0]
 
             self.G.edges[u, v]['pose_list'].append(rod_pose)
             self.G.edges[u, v]['rendered_depth'] = rendered_depth
@@ -290,6 +291,9 @@ class Tracker:
         print(cam2mc_mat)
         return cam2mc_mat
 
+    def compute_matched_pts(obs_depth_im, rendered_depth_im):
+        pass
+
     def track_with_rgbd(self, color_im, depth_im):
         color_im_hsv = cv2.cvtColor(color_im, cv2.COLOR_RGB2HSV)
         H, W, _ = color_im_hsv.shape
@@ -306,9 +310,11 @@ class Tracker:
                 hsv_mask |= cv2.inRange(color_im_hsv, lowerb=(0, 80, 50), upperb=(15, 255, 255)).astype(np.bool8)
 
             obs_depth_im[hsv_mask] = depth_im[hsv_mask]
+            aug_obs_depth_im = obs_depth_im.copy()
             complete_obs_mask |= hsv_mask
 
             vis = np.zeros_like(color_im)
+            vis[obs_depth_im > 0] = 255
             for node in (u, v):
                 center_x, center_y = self.G.nodes[node]['pos_2d']
                 x_min, x_max = center_x - 40, center_x + 40
@@ -324,18 +330,18 @@ class Tracker:
                     x_min, x_max = center_x - 15, center_x + 15
                     y_min, y_max = center_y - 15, center_y + 15
                     prev_roi_depth = self.G.edges[u, v]['rendered_depth'][y_min:y_max, x_min:x_max]
-                    obs_depth_im[y_min:y_max, x_min:x_max] = prev_roi_depth
+                    aug_obs_depth_im[y_min:y_max, x_min:x_max] = prev_roi_depth
                     cv2.rectangle(vis, (x_min, y_min), (x_max, y_max), color=(0, 0, 255))
 
-            vis[obs_depth_im > 0] = 255
-
+            # ICP
             mesh_nodes = [pyrender.Node(name='mesh', mesh=self.end_cap_meshes[0], matrix=np.eye(4)),
                           pyrender.Node(name='mesh', mesh=self.end_cap_meshes[1], matrix=np.eye(4))]
-            init_poses = [prev_pose.copy(), prev_pose.copy()]
-            rod_pose, rendered_depth = self.projective_icp_cuda(obs_depth_im, mesh_nodes, init_poses, max_iter=30,
-                                                                max_distance=0.1, early_stop_thresh=0.001,
-                                                                verbose=False)
-            rod_pose = rod_pose[0]
+            prev_pose_cam = self.data_cfg['cam_extr'] @ prev_pose
+            init_poses = [prev_pose_cam, prev_pose_cam]
+            rod_pose, rendered_depth, rendered_seg = self.projective_icp_cuda(
+                aug_obs_depth_im, mesh_nodes, init_poses, max_iter=30, max_distance=0.1, early_stop_thresh=0.001)
+            rod_pose = la.inv(self.data_cfg['cam_extr']) @ rod_pose[0]
+
             self.G.edges[u, v]['pose_list'].append(rod_pose)
             self.G.edges[u, v]['rendered_depth'] = rendered_depth
             self.G.nodes[u]['pos_list'].append(rod_pose[:3, 3] + rod_pose[:3, 2] * self.rod_length / 2)
@@ -419,14 +425,7 @@ class Tracker:
                 v_pos = X[(3 * v):(3 * v + 3)]
                 estimated_length = la.norm(u_pos - v_pos)
                 measured_length = sensor_measurement[sensor_id]['length'] / 100
-                factor = 1
-                # if balance_factor[u] == 1 and balance_factor[v] == 1:
-                #     factor = 0.2
-                # elif balance_factor[u] == 1 or balance_factor[v] == 1:
-                #     factor = 1
-                # else:
-                #     factor = 1
-                binary_loss += factor * (estimated_length - measured_length)**2
+                binary_loss += (estimated_length - measured_length)**2
 
             return unary_loss + binary_loss
             # return balance_factor * unary_loss + (1 - balance_factor) * binary_loss
@@ -521,8 +520,10 @@ class Tracker:
         camera_node = pyrender.Node(name='cam', camera=camera, matrix=np.eye(4))
         light_node = pyrender.Node(name='light', light=light, matrix=np.eye(4))
         scene = pyrender.Scene(nodes=[camera_node, light_node])
-        for mesh_node in mesh_nodes:
+        seg_node_map = dict()
+        for i, mesh_node in enumerate(mesh_nodes):
             scene.add_node(mesh_node)
+            seg_node_map[mesh_node] = i + 1
 
         m = np.array([
             [1, 0, 0, 0],
@@ -530,9 +531,6 @@ class Tracker:
             [0, 0, -1, 0],
             [0, 0, 0, 1]
         ])
-
-        cam_extr = np.asarray(self.data_cfg['cam_extr'])
-        T_list = [cam_extr @ init_pose for init_pose in init_poses]  # convert to cam frame
 
         depth_im = torch.from_numpy(depth_im).cuda()
         indices = torch.nonzero(depth_im > 0)
@@ -543,10 +541,12 @@ class Tracker:
         Y_obs = (ys - cy) / fy * Z_obs
         pts_obs = torch.stack([X_obs, Y_obs, Z_obs]).T  # (N, 3)
 
+        T_list = init_poses
         for _ in range(max_iter):
             for mesh_node, T in zip(mesh_nodes, T_list):
                 scene.set_pose(mesh_node, m @ T)
-            _, rendered_depth_im = self.renderer.render(scene)
+
+            rendered_depth_im = self.renderer.render(scene, flags=RenderFlags.DEPTH_ONLY)
             rendered_depth_im_gpu = torch.from_numpy(rendered_depth_im).cuda()
 
             indices = np.nonzero(rendered_depth_im_gpu > 0)
@@ -593,7 +593,13 @@ class Tracker:
             if error_after < early_stop_thresh:
                 break
 
-        return [la.inv(cam_extr) @ T for T in T_list], rendered_depth_im
+        # render final depth and segmentation image
+        for mesh_node, T in zip(mesh_nodes, T_list):
+            scene.set_pose(mesh_node, m @ T)
+        rendered_seg, rendered_depth = self.renderer.render(scene, flags=RenderFlags.SEG, seg_node_map=seg_node_map)
+        rendered_seg = rendered_seg[:, :, 0].copy()
+
+        return T_list, rendered_depth, rendered_seg
 
 
 def visualize(data_cfg, pcd, visualizer):
