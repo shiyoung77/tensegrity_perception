@@ -241,21 +241,91 @@ class Tracker:
 
         self.initialized = True
 
-    def update(self, color_im, depth_im, info):
+    def update(self, color_im, depth_im, info, max_iter=3):
         assert self.initialized, "[Error] You must first initialize the tracker!"
 
-        complete_obs_mask = self.track_with_rgbd(color_im, depth_im)
+        color_im_hsv = cv2.cvtColor(color_im, cv2.COLOR_RGB2HSV)
+        H, W, _ = color_im_hsv.shape
 
-        self.constrained_optimization(info)
+        for iter in range(max_iter):
+            for color, (u, v) in self.data_cfg['color_to_rod'].items():
+                prev_pose = self.G.edges[u, v]['pose_list'][-1].copy()
+                obs_depth_im = np.zeros_like(depth_im)
 
-        complete_obs_color = np.zeros_like(color_im)
-        complete_obs_depth = np.zeros_like(depth_im)
-        complete_obs_color[complete_obs_mask] = color_im[complete_obs_mask]
-        complete_obs_depth[complete_obs_mask] = depth_im[complete_obs_mask]
+                hsv_mask = cv2.inRange(color_im_hsv,
+                                    lowerb=tuple(self.data_cfg['hsv_ranges'][color][0]),
+                                    upperb=tuple(self.data_cfg['hsv_ranges'][color][1])).astype(np.bool8)
+                if color == 'red':
+                    hsv_mask |= cv2.inRange(color_im_hsv, lowerb=(0, 80, 50), upperb=(15, 255, 255)).astype(np.bool8)
 
-        # self.rigid_finetune(complete_obs_depth)
+                obs_depth_im[hsv_mask] = depth_im[hsv_mask]
+                aug_obs_depth_im = obs_depth_im.copy()
 
-        return complete_obs_color, complete_obs_depth
+                vis = np.zeros_like(color_im)
+                vis[obs_depth_im > 0] = 255
+                for node in (u, v):
+                    center_x, center_y = self.G.nodes[node]['pos_2d']
+                    x_min, x_max = center_x - 40, center_x + 40
+                    y_min, y_max = center_y - 40, center_y + 40
+                    cv2.rectangle(vis, (x_min, y_min), (x_max, y_max), color=(255, 0, 0))
+                    cv2.putText(vis, str(node), (x_min, y_min), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 255), 2, cv2.LINE_AA)
+
+                    ys, xs = np.nonzero(hsv_mask[y_min:y_max, x_min:x_max])
+                    num_obs_pixels = ys.shape[0]
+                    self.G.nodes[node]['num_obs_pixels'] = num_obs_pixels
+
+                    if num_obs_pixels < 50:
+                        center_x, center_y = self.G.nodes[node]['pos_2d']
+                        x_min, x_max = center_x - 15, center_x + 15
+                        y_min, y_max = center_y - 15, center_y + 15
+                        prev_roi_depth = self.G.edges[u, v]['rendered_depth'][y_min:y_max, x_min:x_max]
+                        aug_obs_depth_im[y_min:y_max, x_min:x_max] = prev_roi_depth
+                        cv2.rectangle(vis, (x_min, y_min), (x_max, y_max), color=(0, 0, 255))
+
+                # ICP
+                mesh_nodes = [pyrender.Node(name='mesh', mesh=self.end_cap_meshes[0], matrix=np.eye(4)),
+                            pyrender.Node(name='mesh', mesh=self.end_cap_meshes[1], matrix=np.eye(4))]
+                prev_pose_cam = self.data_cfg['cam_extr'] @ prev_pose
+                init_poses = [prev_pose_cam, prev_pose_cam]
+                # tic = time.time()
+                rod_pose, rendered_depth, rendered_seg = self.projective_icp_cuda(
+                    aug_obs_depth_im, mesh_nodes, init_poses, max_iter=1, max_distance=0.1, early_stop_thresh=0.001)
+                # print(f"icp takes {time.time() - tic}s")
+                rod_pose = la.inv(self.data_cfg['cam_extr']) @ rod_pose[0]
+                confidence_u, confidence_v = self.compute_confidence(obs_depth_im, rendered_depth, rendered_seg,
+                                                                    inlier_thresh=0.03)
+
+                if iter == 0:
+                    self.G.edges[u, v]['pose_list'].append(rod_pose)
+                    self.G.nodes[u]['pos_list'].append(rod_pose[:3, 3] + rod_pose[:3, 2] * self.rod_length / 2)
+                    self.G.nodes[v]['pos_list'].append(rod_pose[:3, 3] - rod_pose[:3, 2] * self.rod_length / 2)
+                else:
+                    self.G.edges[u, v]['pose_list'][-1] = rod_pose
+                    self.G.nodes[u]['pos_list'][-1] = rod_pose[:3, 3] + rod_pose[:3, 2] * self.rod_length / 2
+                    self.G.nodes[v]['pos_list'][-1] = rod_pose[:3, 3] - rod_pose[:3, 2] * self.rod_length / 2
+
+                self.G.edges[u, v]['rendered_depth'] = rendered_depth
+                self.G.nodes[u]['pos_2d'], self.G.nodes[u]['roi_2d'] = self.get_end_cap_roi(u, radius=0.03)
+                self.G.nodes[v]['pos_2d'], self.G.nodes[v]['roi_2d'] = self.get_end_cap_roi(v, radius=0.03)
+                self.G.nodes[u]['confidence'] = confidence_u
+                self.G.nodes[v]['confidence'] = confidence_v
+
+                if iter == max_iter - 1:
+                    if color == 'green':
+                        vis[rendered_depth > 0] = [0, 255, 0]
+                        cv2.imshow("green_obs", vis)
+                    elif color == 'blue':
+                        vis[rendered_depth > 0] = [255, 0, 0]
+                        cv2.imshow("blue_obs", vis)
+                    elif color == 'red':
+                        vis[rendered_depth > 0] = [0, 0, 255]
+                        cv2.imshow("red_obs", vis)
+
+            # tic = time.time()
+            self.constrained_optimization(info)
+            # print(f"optimization takes {time.time() - tic}s")
+
+        return
 
     def compute_mc2cam_mat(self, info):
         cap_end_pos = list()
@@ -331,80 +401,6 @@ class Tracker:
         matched_u = torch.sum(matched_labels == 1).cpu().item()
         matched_v = torch.sum(matched_labels == 2).cpu().item()
         return max(0.1, matched_u / rendered_u), max(0.1, matched_v / rendered_v)
-
-    def track_with_rgbd(self, color_im, depth_im):
-        color_im_hsv = cv2.cvtColor(color_im, cv2.COLOR_RGB2HSV)
-        H, W, _ = color_im_hsv.shape
-
-        complete_obs_mask = np.zeros((H, W), dtype=np.bool8)
-        for color, (u, v) in self.data_cfg['color_to_rod'].items():
-            prev_pose = self.G.edges[u, v]['pose_list'][-1].copy()
-            obs_depth_im = np.zeros_like(depth_im)
-
-            hsv_mask = cv2.inRange(color_im_hsv,
-                                   lowerb=tuple(self.data_cfg['hsv_ranges'][color][0]),
-                                   upperb=tuple(self.data_cfg['hsv_ranges'][color][1])).astype(np.bool8)
-            if color == 'red':
-                hsv_mask |= cv2.inRange(color_im_hsv, lowerb=(0, 80, 50), upperb=(15, 255, 255)).astype(np.bool8)
-
-            obs_depth_im[hsv_mask] = depth_im[hsv_mask]
-            aug_obs_depth_im = obs_depth_im.copy()
-            complete_obs_mask |= hsv_mask
-
-            vis = np.zeros_like(color_im)
-            vis[obs_depth_im > 0] = 255
-            for node in (u, v):
-                center_x, center_y = self.G.nodes[node]['pos_2d']
-                x_min, x_max = center_x - 40, center_x + 40
-                y_min, y_max = center_y - 40, center_y + 40
-                cv2.rectangle(vis, (x_min, y_min), (x_max, y_max), color=(255, 0, 0))
-                cv2.putText(vis, str(node), (x_min, y_min), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 255), 2, cv2.LINE_AA)
-
-                ys, xs = np.nonzero(hsv_mask[y_min:y_max, x_min:x_max])
-                num_obs_pixels = ys.shape[0]
-                self.G.nodes[node]['num_obs_pixels'] = num_obs_pixels
-
-                if num_obs_pixels < 50:
-                    center_x, center_y = self.G.nodes[node]['pos_2d']
-                    x_min, x_max = center_x - 15, center_x + 15
-                    y_min, y_max = center_y - 15, center_y + 15
-                    prev_roi_depth = self.G.edges[u, v]['rendered_depth'][y_min:y_max, x_min:x_max]
-                    aug_obs_depth_im[y_min:y_max, x_min:x_max] = prev_roi_depth
-                    cv2.rectangle(vis, (x_min, y_min), (x_max, y_max), color=(0, 0, 255))
-
-            # ICP
-            mesh_nodes = [pyrender.Node(name='mesh', mesh=self.end_cap_meshes[0], matrix=np.eye(4)),
-                          pyrender.Node(name='mesh', mesh=self.end_cap_meshes[1], matrix=np.eye(4))]
-            prev_pose_cam = self.data_cfg['cam_extr'] @ prev_pose
-            init_poses = [prev_pose_cam, prev_pose_cam]
-            rod_pose, rendered_depth, rendered_seg = self.projective_icp_cuda(
-                aug_obs_depth_im, mesh_nodes, init_poses, max_iter=30, max_distance=0.1, early_stop_thresh=0.001)
-            rod_pose = la.inv(self.data_cfg['cam_extr']) @ rod_pose[0]
-            confidence_u, confidence_v = self.compute_confidence(obs_depth_im, rendered_depth, rendered_seg,
-                                                                 inlier_thresh=0.03)
-            # print(f"color: {color}, node {u} confidence: {confidence_u}")
-            # print(f"color: {color}, node {v} confidence: {confidence_v}")
-
-            self.G.edges[u, v]['pose_list'].append(rod_pose)
-            self.G.edges[u, v]['rendered_depth'] = rendered_depth
-            self.G.nodes[u]['pos_list'].append(rod_pose[:3, 3] + rod_pose[:3, 2] * self.rod_length / 2)
-            self.G.nodes[v]['pos_list'].append(rod_pose[:3, 3] - rod_pose[:3, 2] * self.rod_length / 2)
-            self.G.nodes[u]['pos_2d'], self.G.nodes[u]['roi_2d'] = self.get_end_cap_roi(u, radius=0.03)
-            self.G.nodes[v]['pos_2d'], self.G.nodes[v]['roi_2d'] = self.get_end_cap_roi(v, radius=0.03)
-            self.G.nodes[u]['confidence'] = confidence_u
-            self.G.nodes[v]['confidence'] = confidence_v
-
-            if color == 'green':
-                vis[rendered_depth > 0] = [0, 255, 0]
-                cv2.imshow("green_obs", vis)
-            elif color == 'blue':
-                vis[rendered_depth > 0] = [255, 0, 0]
-                cv2.imshow("blue_obs", vis)
-            elif color == 'red':
-                vis[rendered_depth > 0] = [0, 0, 255]
-                cv2.imshow("red_obs", vis)
-
-        return complete_obs_mask
 
     def constrained_optimization(self, info):
         rod_length = self.data_cfg['rod_length']
@@ -680,6 +676,7 @@ if __name__ == '__main__':
     parser.add_argument("--bottom_end_cap_mesh_file", default="pcd/yale/end_cap_bottom.obj")
     parser.add_argument("--rod_pcd_file", default="pcd/yale/untethered_rod_w_end_cap.pcd")
     parser.add_argument("--first_frame_id", default=50, type=int)
+    parser.add_argument("--max_iter", default=3, type=int)
     parser.add_argument("-v", "--visualize", default=True, action="store_true")
     args = parser.parse_args()
 
@@ -739,7 +736,6 @@ if __name__ == '__main__':
     os.makedirs(os.path.join(video_path, "scene_cloud"), exist_ok=True)
     os.makedirs(os.path.join(video_path, "estimation_cloud"), exist_ok=True)
     os.makedirs(os.path.join(video_path, "raw_estimation"), exist_ok=True)
-    os.makedirs(os.path.join(video_path, "observation"), exist_ok=True)
 
     if args.visualize:
         visualizer = o3d.visualization.Visualizer()
@@ -770,12 +766,7 @@ if __name__ == '__main__':
         info['sensor_status']['7'] = False
         info['sensor_status']['8'] = False
 
-        complete_obs_rgb, complete_obs_depth = tracker.update(color_im, depth_im, info)
-        # complete_obs_bgr = cv2.cvtColor(complete_obs_rgb, cv2.COLOR_RGB2BGR)
-        # complete_obs_bgr[complete_obs_depth == 0] = 0
-        # cv2.imwrite(os.path.join(video_path, 'observation', f"{idx:04d}.png"), complete_obs_bgr)
-
-        # tracker.compute_mc2cam_mat(info)
+        tracker.update(color_im, depth_im, info, args.max_iter)
 
         if args.visualize:
             scene_pcd = perception_utils.create_pcd(depth_im, data_cfg['cam_intr'], color_im,
@@ -796,8 +787,7 @@ if __name__ == '__main__':
             # o3d.io.write_point_cloud(os.path.join(video_path, "estimation_cloud", f"{idx:04d}.ply"), estimation_cloud)
 
             cv2.imshow("observation", color_im_bgr)
-            # cv2.imshow("filtered_observation", complete_obs_bgr)
-            key = cv2.waitKey(0)
+            key = cv2.waitKey(1)
             if key == ord('q'):
                 exit(0)
 
