@@ -330,7 +330,7 @@ class Tracker:
         matched_labels = pts_labels[dist_mask]
         matched_u = torch.sum(matched_labels == 1).cpu().item()
         matched_v = torch.sum(matched_labels == 2).cpu().item()
-        return matched_u / rendered_u, matched_v / rendered_v
+        return max(0.1, matched_u / rendered_u), max(0.1, matched_v / rendered_v)
 
     def track_with_rgbd(self, color_im, depth_im):
         color_im_hsv = cv2.cvtColor(color_im, cv2.COLOR_RGB2HSV)
@@ -381,9 +381,9 @@ class Tracker:
                 aug_obs_depth_im, mesh_nodes, init_poses, max_iter=30, max_distance=0.1, early_stop_thresh=0.001)
             rod_pose = la.inv(self.data_cfg['cam_extr']) @ rod_pose[0]
             confidence_u, confidence_v = self.compute_confidence(obs_depth_im, rendered_depth, rendered_seg,
-                                                                 inlier_thresh=0.05)
-            print(f"color: {color}, node {u} confidence: {confidence_u}")
-            print(f"color: {color}, node {v} confidence: {confidence_v}")
+                                                                 inlier_thresh=0.03)
+            # print(f"color: {color}, node {u} confidence: {confidence_u}")
+            # print(f"color: {color}, node {v} confidence: {confidence_v}")
 
             self.G.edges[u, v]['pose_list'].append(rod_pose)
             self.G.edges[u, v]['rendered_depth'] = rendered_depth
@@ -450,10 +450,6 @@ class Tracker:
                 pos = X[(3 * i):(3 * i + 3)]
                 estimated_pos = self.G.nodes[i]['pos_list'][-1]
                 confidence = self.G.nodes[i].get('confidence', 1)
-                if confidence > 0.2:
-                    confidence = 1
-                elif confidence < 0.2:
-                    confidence = 0.2
                 unary_loss += confidence * np.sum((pos - estimated_pos)**2)
 
             binary_loss = 0
@@ -462,11 +458,19 @@ class Tracker:
                 if not sensor_status[sensor_id] or sensor_measurement[sensor_id]['length'] <= 0:
                     continue
 
+                u_confidence = self.G.nodes[u].get('confidence', 1)
+                v_confidence = self.G.nodes[v].get('confidence', 1)
+                factor = 0.5
+                if u_confidence > 0.5 and v_confidence > 0.5:
+                    factor = 0
+                if u_confidence < 0.2 or v_confidence <= 0.2:
+                    factor = 1
+
                 u_pos = X[(3 * u):(3 * u + 3)]
                 v_pos = X[(3 * v):(3 * v + 3)]
                 estimated_length = la.norm(u_pos - v_pos)
                 measured_length = sensor_measurement[sensor_id]['length'] / 100
-                binary_loss += (estimated_length - measured_length)**2
+                binary_loss += factor * (estimated_length - measured_length)**2
 
             return unary_loss + binary_loss
 
