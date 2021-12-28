@@ -153,7 +153,7 @@ class Tracker:
                                        lowerb=tuple(self.data_cfg['hsv_ranges'][color][0]),
                                        upperb=tuple(self.data_cfg['hsv_ranges'][color][1])).astype(np.bool8)
                 if color == 'red':
-                    hsv_mask |= cv2.inRange(color_im_hsv, lowerb=(0, 50, 50), upperb=(20, 255, 255)).astype(np.bool8)
+                    hsv_mask |= cv2.inRange(color_im_hsv, lowerb=(0, 80, 50), upperb=(20, 255, 255)).astype(np.bool8)
                 mask &= hsv_mask
                 if mask.sum() == 0:
                     print(color, ' has not points at node ', node)
@@ -222,11 +222,11 @@ class Tracker:
         # self.rigid_finetune(complete_obs_depth)
 
         if visualize:
-            complete_obs_hsv = cv2.cvtColor(complete_obs_color, cv2.COLOR_RGB2HSV)
+            hsv_im = cv2.cvtColor(color_im, cv2.COLOR_RGB2HSV)
             _, axes = plt.subplots(2, 2)
             axes[0, 0].imshow(color_im)
             axes[0, 1].imshow(complete_obs_color)
-            axes[1, 0].imshow(complete_obs_hsv)
+            axes[1, 0].imshow(hsv_im)
             axes[1, 1].imshow(complete_obs_depth)
             plt.show()
 
@@ -669,7 +669,8 @@ if __name__ == '__main__':
     # parser.add_argument("--video_id", default="fabric2")
     # parser.add_argument("--video_id", default="six_cameras10")
     # parser.add_argument("--video_id", default="crawling_sim")
-    parser.add_argument("--video_id", default="socks6")
+    # parser.add_argument("--video_id", default="socks6")
+    parser.add_argument("--video_id", default="dynamic")
     # parser.add_argument("--rod_mesh_file", default="pcd/yale/untethered_rod_w_end_cap.ply")
     parser.add_argument("--rod_mesh_file", default="pcd/yale/end_cap_only_new.obj")
     parser.add_argument("--top_end_cap_mesh_file", default="pcd/yale/end_cap_top.obj")
@@ -729,7 +730,7 @@ if __name__ == '__main__':
     info['sensor_status']['7'] = False
     info['sensor_status']['8'] = False
 
-    tracker.initialize(color_im, depth_im, info, visualize=args.visualize, compute_hsv=False)
+    tracker.initialize(color_im, depth_im, info, visualize=args.visualize, compute_hsv=True)
     data_cfg_module.write_config(tracker.data_cfg)
 
     # track frames
@@ -783,7 +784,7 @@ if __name__ == '__main__':
 
             estimation_cloud = robot_cloud + scene_pcd
             visualize(data_cfg, estimation_cloud, visualizer)
-            # visualizer.capture_screen_image(os.path.join(video_path, "raw_estimation", f"{idx:04d}.png"))
+            visualizer.capture_screen_image(os.path.join(video_path, "raw_estimation", f"{idx:04d}.png"))
             # o3d.io.write_point_cloud(os.path.join(video_path, "estimation_cloud", f"{idx:04d}.ply"), estimation_cloud)
 
             cv2.imshow("observation", color_im_bgr)
