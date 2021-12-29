@@ -289,7 +289,7 @@ class Tracker:
                 init_poses = [prev_pose_cam, prev_pose_cam]
                 # tic = time.time()
                 rod_pose, rendered_depth, rendered_seg = self.projective_icp_cuda(
-                    aug_obs_depth_im, mesh_nodes, init_poses, max_iter=1, max_distance=0.1, early_stop_thresh=0.001)
+                    aug_obs_depth_im, mesh_nodes, init_poses, max_iter=10, max_distance=0.05, early_stop_thresh=0.001)
                 # print(f"icp takes {time.time() - tic}s")
                 rod_pose = la.inv(self.data_cfg['cam_extr']) @ rod_pose[0]
                 confidence_u, confidence_v = self.compute_confidence(obs_depth_im, rendered_depth, rendered_seg,
@@ -676,8 +676,8 @@ if __name__ == '__main__':
     parser.add_argument("--top_end_cap_mesh_file", default="pcd/yale/end_cap_top.obj")
     parser.add_argument("--bottom_end_cap_mesh_file", default="pcd/yale/end_cap_bottom.obj")
     parser.add_argument("--rod_pcd_file", default="pcd/yale/untethered_rod_w_end_cap.pcd")
-    parser.add_argument("--first_frame_id", default=19, type=int)
-    parser.add_argument("--max_iter", default=3, type=int)
+    parser.add_argument("--first_frame_id", default=20, type=int)
+    parser.add_argument("--max_iter", default=5, type=int)
     parser.add_argument("-v", "--visualize", default=True, action="store_true")
     args = parser.parse_args()
 
@@ -726,11 +726,11 @@ if __name__ == '__main__':
         info = json.load(f)
 
     info['sensor_status'] = {key: True for key in info['sensors'].keys()}
-    info['sensor_status']['6'] = False
-    info['sensor_status']['7'] = False
-    info['sensor_status']['8'] = False
+    # info['sensor_status']['6'] = False
+    # info['sensor_status']['7'] = False
+    # info['sensor_status']['8'] = False
 
-    tracker.initialize(color_im, depth_im, info, visualize=args.visualize, compute_hsv=True)
+    tracker.initialize(color_im, depth_im, info, visualize=args.visualize, compute_hsv=False)
     data_cfg_module.write_config(tracker.data_cfg)
 
     # track frames
@@ -763,9 +763,9 @@ if __name__ == '__main__':
             info = json.load(f)
 
         info['sensor_status'] = {key: True for key in info['sensors'].keys()}
-        info['sensor_status']['6'] = False
-        info['sensor_status']['7'] = False
-        info['sensor_status']['8'] = False
+        # info['sensor_status']['6'] = False
+        # info['sensor_status']['7'] = False
+        # info['sensor_status']['8'] = False
 
         tracker.update(color_im, depth_im, info, args.max_iter)
 
@@ -785,6 +785,7 @@ if __name__ == '__main__':
             estimation_cloud = robot_cloud + scene_pcd
             visualize(data_cfg, estimation_cloud, visualizer)
             visualizer.capture_screen_image(os.path.join(video_path, "raw_estimation", f"{idx:04d}.png"))
+            o3d.io.write_point_cloud(os.path.join(video_path, "scene_cloud", f"{idx:04d}.ply"), scene_pcd)
             # o3d.io.write_point_cloud(os.path.join(video_path, "estimation_cloud", f"{idx:04d}.ply"), estimation_cloud)
 
             cv2.imshow("observation", color_im_bgr)

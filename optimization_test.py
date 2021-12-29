@@ -28,13 +28,15 @@ print(res)
 
 if __name__ == '__main__':
     dataset = 'dataset'
-    video_id = "crawling_sim"
+    # video_id = "crawling_sim"
+    video_id = 'dynamic'
     prefixes = sorted([i.split('.')[0] for i in os.listdir(os.path.join(dataset, video_id, 'color'))])
 
     data_cfg_module = importlib.import_module(f'{dataset}.{video_id}.config')
     data_cfg = data_cfg_module.get_config(read_cfg=True)
 
-    pose_output_folder = os.path.join(dataset, video_id, "poses")
+    # pose_output_folder = os.path.join(dataset, video_id, "poses")
+    pose_output_folder = os.path.join(dataset, video_id, 'smoothed_poses')
     pos_dict = dict()
     for i in range(len(data_cfg['node_to_color'])):
         pos_dict[i] = np.load(os.path.join(pose_output_folder, f'{i}_pos.npy'))
