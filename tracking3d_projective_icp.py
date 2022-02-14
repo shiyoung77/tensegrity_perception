@@ -1,3 +1,4 @@
+import enum
 import os
 import time
 import copy
@@ -5,6 +6,7 @@ import importlib
 import pprint
 import json
 from argparse import ArgumentParser
+from typing import List, Dict
 
 import numpy as np
 import numpy.linalg as la
@@ -23,23 +25,36 @@ import perception_utils
 
 
 class Tracker:
+
     ColorDict = {
         "red": [255, 0, 0],
         "green": [0, 255, 0],
         "blue": [0, 0, 255]
     }
 
-    def __init__(self, data_cfg, rod_pcd=None, end_cap_meshes=None):
+    def __init__(self, data_cfg, rod_pcd=None, rod_mesh=None, end_cap_meshes=None):
         self.data_cfg = data_cfg
         pprint.pprint(self.data_cfg)
         self.initialized = False
 
         self.end_cap_meshes = end_cap_meshes
         self.rod_pcd = copy.deepcopy(rod_pcd)
+        self.rod_mesh = rod_mesh
         self.rod_length = self.data_cfg['rod_length']
 
+        # set up pyrender scene
         H, W = self.data_cfg['im_h'], self.data_cfg['im_w']
         self.renderer = pyrender.OffscreenRenderer(W, H)
+        cam_intr = np.asarray(self.data_cfg['cam_intr'])
+        fx = cam_intr[0, 0]
+        fy = cam_intr[1, 1]
+        cx = cam_intr[0, 2]
+        cy = cam_intr[1, 2]
+        camera = pyrender.IntrinsicsCamera(fx=fx, fy=fy, cx=cx, cy=cy)
+        light = pyrender.SpotLight(color=np.ones(3), intensity=3.0, innerConeAngle=np.pi / 16.0)
+        camera_node = pyrender.Node(name='cam', camera=camera, matrix=np.eye(4))
+        light_node = pyrender.Node(name='light', light=light, matrix=np.eye(4))
+        self.render_scene = pyrender.Scene(nodes=[camera_node, light_node])
 
         # initialize graph
         self.G = nx.Graph()
@@ -66,6 +81,7 @@ class Tracker:
             self.G.edges[u, v]['color'] = color
             self.G.edges[u, v]['pose_list'] = []
 
+
     def initialize(self, color_im: np.ndarray, depth_im: np.ndarray, info: dict,
                    visualize: bool = True, compute_hsv: bool = True):
 
@@ -75,9 +91,6 @@ class Tracker:
             plane_frame, _ = perception_utils.plane_detection_ransac(scene_pcd, inlier_thresh=0.005,
                                                                      visualize=visualize)
             self.data_cfg['cam_extr'] = np.round(plane_frame, decimals=3)
-        else:
-            plane_frame = self.data_cfg['cam_extr']
-        scene_pcd.transform(la.inv(self.data_cfg['cam_extr']))
 
         if 'init_end_cap_rois' not in self.data_cfg:
             color_im_bgr = cv2.cvtColor(color_im, cv2.COLOR_RGB2BGR)
@@ -155,65 +168,30 @@ class Tracker:
                 if color == 'red':
                     hsv_mask |= cv2.inRange(color_im_hsv, lowerb=(0, 80, 50), upperb=(20, 255, 255)).astype(np.bool8)
                 mask &= hsv_mask
-                if mask.sum() == 0:
-                    print(color, ' has not points at node ', node)
-                    assert mask.sum() > 0
-                else:
-                    print(f"{color} node id {node} has {mask.sum()} points in pcd.")
+                assert mask.sum() > 0, f"node {node} ({color}) has no points observable in the initial frame."
                 obs_depth_im[mask] = depth_im[mask]
                 masked_depth_im = depth_im * mask
-                end_cap_pcd = perception_utils.create_pcd(masked_depth_im, self.data_cfg['cam_intr'],
-                                                          cam_extr=self.data_cfg['cam_extr'])
+                complete_obs_mask |= mask
 
-                # # filter end_cap_pcd by finding the largest cluster
-                # labels = np.asarray(end_cap_pcd.cluster_dbscan(eps=0.02, min_points=10, print_progress=False))
-                # points_for_each_cluster = [(labels == label).sum() for label in range(labels.max() + 1)]
-                # label = np.argmax(points_for_each_cluster)
-                # masked_indices = np.where(labels == label)[0]
-                # end_cap_pcd = end_cap_pcd.select_by_index(masked_indices)
-                # o3d.visualization.draw_geometries([end_cap_pcd])
-
+                # filter observable end cap point cloud by finding the largest cluster
+                end_cap_pcd = perception_utils.create_pcd(masked_depth_im, self.data_cfg['cam_intr'])
+                labels = np.asarray(end_cap_pcd.cluster_dbscan(eps=0.005, min_points=10, print_progress=False))
+                points_for_each_cluster = [(labels == label).sum() for label in range(labels.max() + 1)]
+                label = np.argmax(points_for_each_cluster)
+                masked_indices = np.where(labels == label)[0]
+                end_cap_pcd = end_cap_pcd.select_by_index(masked_indices)
                 end_cap_center = np.asarray(end_cap_pcd.points).mean(axis=0)
                 end_cap_centers.append(end_cap_center)
 
-                complete_obs_mask |= mask
-
-            # compute rod pose given end cap centers
-            init_pose = self.estimate_rod_pose_from_end_cap_centers(end_cap_centers)
-            rod_pcd = copy.deepcopy(self.rod_pcd)
-            rod_pcd = rod_pcd.paint_uniform_color(np.array(Tracker.ColorDict[color]) / 255)
-
             # icp refinement
-            mesh_nodes = [pyrender.Node(name='mesh', mesh=self.end_cap_meshes[0], matrix=np.eye(4)),
-                          pyrender.Node(name='mesh', mesh=self.end_cap_meshes[1], matrix=np.eye(4))]
-            init_rod_pose_cam = self.data_cfg['cam_extr'] @ init_pose
-            init_poses = [init_rod_pose_cam, init_rod_pose_cam]
-            rod_pose, rendered_depth, rendered_seg = self.projective_icp_cuda(
-                obs_depth_im, mesh_nodes, init_poses, max_iter=30, max_distance=0.02, early_stop_thresh=0.0015)
-            rod_pose = la.inv(self.data_cfg['cam_extr']) @ rod_pose[0]
+            init_pose = self.estimate_rod_pose_from_end_cap_centers(end_cap_centers)
+            mesh_nodes = [self.create_scene_node(str(i), self.end_cap_meshes[i], init_pose) for i in range(2)]
+            pts_obs, _ = self.back_projection(torch.from_numpy(obs_depth_im).cuda())
+            rod_pose = self.projective_icp_cuda(pts_obs, mesh_nodes, init_pose, max_distance=0.02, verbose=False)
 
             self.G.edges[u, v]['pose_list'].append(rod_pose)
-            self.G.edges[u, v]['rendered_depth'] = rendered_depth
             self.G.nodes[u]['pos_list'].append(rod_pose[:3, 3] + rod_pose[:3, 2] * self.rod_length / 2)
             self.G.nodes[v]['pos_list'].append(rod_pose[:3, 3] - rod_pose[:3, 2] * self.rod_length / 2)
-            self.G.nodes[u]['pos_2d'], self.G.nodes[u]['roi_2d'] = self.get_end_cap_roi(u, radius=0.03)
-            self.G.nodes[v]['pos_2d'], self.G.nodes[v]['roi_2d'] = self.get_end_cap_roi(v, radius=0.03)
-
-        """
-        for color, (u, v) in self.data_cfg['color_to_rod'].items():
-            rendered_depth = self.G.edges[u, v]['rendered_depth']
-            vis = np.zeros_like(color_im)
-            vis[rendered_depth > 0] = [255, 255, 255]
-
-            cv2.rectangle(vis, (x_min, y_min), (x_max, y_max), color=(0, 0, 255))
-
-            x_min, y_min, x_max, y_max = self.get_end_cap_roi(v, radius=0.03)
-            cv2.rectangle(vis, (x_min, y_min), (x_max, y_max), color=(0, 0, 255))
-
-            plt.imshow(vis)
-            plt.show()
-        # exit(0)
-        """
 
         complete_obs_color[complete_obs_mask] = color_im[complete_obs_mask]
         complete_obs_depth[complete_obs_mask] = depth_im[complete_obs_mask]
@@ -241,59 +219,71 @@ class Tracker:
 
         self.initialized = True
 
+
+    def back_projection(self, depth_im: torch.Tensor):
+        cam_intr = np.asarray(self.data_cfg['cam_intr'])
+        fx, fy = cam_intr[0, 0], cam_intr[1, 1]
+        cx, cy = cam_intr[0, 2], cam_intr[1, 2]
+
+        indices = torch.nonzero(depth_im > 0)
+        ys, xs = indices[:, 0], indices[:, 1]
+        Z_obs = depth_im[ys, xs]
+        X_obs = (xs - cx) / fx * Z_obs
+        Y_obs = (ys - cy) / fy * Z_obs
+        pts = torch.stack([X_obs, Y_obs, Z_obs]).T  # (N, 3)
+        return pts, (ys, xs)
+
+
+    def compute_hsv_mask(self, color_im, color) -> np.ndarray:
+        color_im_hsv = cv2.cvtColor(color_im, cv2.COLOR_RGB2HSV)
+        hsv_mask = cv2.inRange(color_im_hsv,
+                            lowerb=tuple(self.data_cfg['hsv_ranges'][color][0]),
+                            upperb=tuple(self.data_cfg['hsv_ranges'][color][1])).astype(np.bool8)
+        if color == 'red':
+            hsv_mask |= cv2.inRange(color_im_hsv, lowerb=(0, 80, 50), upperb=(15, 255, 255)).astype(np.bool8)
+        return hsv_mask
+
+
+    def compute_obs_pts(self, depth_im, mask):
+        if isinstance(depth_im, np.ndarray):
+            depth_im = torch.from_numpy(depth_im).cuda()
+        if isinstance(mask, np.ndarray):
+            mask = torch.from_numpy(mask).cuda()
+
+        obs_depth_im = torch.zeros_like(depth_im)
+        obs_depth_im[mask] = depth_im[mask]
+        obs_pts, _ = self.back_projection(obs_depth_im)
+        return obs_pts
+
+
     def update(self, color_im, depth_im, info, max_iter=3):
         assert self.initialized, "[Error] You must first initialize the tracker!"
 
-        color_im_hsv = cv2.cvtColor(color_im, cv2.COLOR_RGB2HSV)
-        H, W, _ = color_im_hsv.shape
+        depth_im_gpu = torch.from_numpy(depth_im).cuda()
+
+        obs_pts_dict = dict()
+        for color, (u, v) in self.data_cfg['color_to_rod'].items():
+            hsv_mask = self.compute_hsv_mask(color_im, color)
+            obs_pts = self.compute_obs_pts(depth_im_gpu, hsv_mask)
+
+            # add fake points at the prev end cap position
+            fake_pts = np.stack([self.G.nodes[u]['pos_list'][-1], self.G.nodes[v]['pos_list'][-1]])
+            fake_pts = torch.from_numpy(fake_pts).to(torch.float32).cuda()
+            fake_pts = torch.tile(fake_pts, (50, 1))
+
+            augmented_obs_pts = torch.vstack([obs_pts, fake_pts])
+            obs_pts_dict[color] = augmented_obs_pts
 
         for iter in range(max_iter):
+            # ================================== prediction step ==================================
             for color, (u, v) in self.data_cfg['color_to_rod'].items():
                 prev_pose = self.G.edges[u, v]['pose_list'][-1].copy()
-                obs_depth_im = np.zeros_like(depth_im)
+                mesh_nodes = [self.create_scene_node(str(i), self.end_cap_meshes[i], prev_pose) for i in range(2)]
 
-                hsv_mask = cv2.inRange(color_im_hsv,
-                                    lowerb=tuple(self.data_cfg['hsv_ranges'][color][0]),
-                                    upperb=tuple(self.data_cfg['hsv_ranges'][color][1])).astype(np.bool8)
-                if color == 'red':
-                    hsv_mask |= cv2.inRange(color_im_hsv, lowerb=(0, 80, 50), upperb=(15, 255, 255)).astype(np.bool8)
-
-                obs_depth_im[hsv_mask] = depth_im[hsv_mask]
-                aug_obs_depth_im = obs_depth_im.copy()
-
-                vis = np.zeros_like(color_im)
-                vis[obs_depth_im > 0] = 255
-                for node in (u, v):
-                    center_x, center_y = self.G.nodes[node]['pos_2d']
-                    x_min, x_max = center_x - 40, center_x + 40
-                    y_min, y_max = center_y - 40, center_y + 40
-                    cv2.rectangle(vis, (x_min, y_min), (x_max, y_max), color=(255, 0, 0))
-                    cv2.putText(vis, str(node), (x_min, y_min), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 255), 2, cv2.LINE_AA)
-
-                    ys, xs = np.nonzero(hsv_mask[y_min:y_max, x_min:x_max])
-                    num_obs_pixels = ys.shape[0]
-                    self.G.nodes[node]['num_obs_pixels'] = num_obs_pixels
-
-                    if num_obs_pixels < 50:
-                        center_x, center_y = self.G.nodes[node]['pos_2d']
-                        x_min, x_max = center_x - 15, center_x + 15
-                        y_min, y_max = center_y - 15, center_y + 15
-                        prev_roi_depth = self.G.edges[u, v]['rendered_depth'][y_min:y_max, x_min:x_max]
-                        aug_obs_depth_im[y_min:y_max, x_min:x_max] = prev_roi_depth
-                        cv2.rectangle(vis, (x_min, y_min), (x_max, y_max), color=(0, 0, 255))
-
-                # ICP
-                mesh_nodes = [pyrender.Node(name='mesh', mesh=self.end_cap_meshes[0], matrix=np.eye(4)),
-                            pyrender.Node(name='mesh', mesh=self.end_cap_meshes[1], matrix=np.eye(4))]
-                prev_pose_cam = self.data_cfg['cam_extr'] @ prev_pose
-                init_poses = [prev_pose_cam, prev_pose_cam]
                 # tic = time.time()
-                rod_pose, rendered_depth, rendered_seg = self.projective_icp_cuda(
-                    aug_obs_depth_im, mesh_nodes, init_poses, max_iter=10, max_distance=0.05, early_stop_thresh=0.001)
+                obs_pts = obs_pts_dict[color]
+                rod_pose = self.projective_icp_cuda(obs_pts, mesh_nodes, prev_pose, max_distance=0.1, verbose=False)
                 # print(f"icp takes {time.time() - tic}s")
-                rod_pose = la.inv(self.data_cfg['cam_extr']) @ rod_pose[0]
-                confidence_u, confidence_v = self.compute_confidence(obs_depth_im, rendered_depth, rendered_seg,
-                                                                    inlier_thresh=0.03)
 
                 if iter == 0:
                     self.G.edges[u, v]['pose_list'].append(rod_pose)
@@ -304,89 +294,67 @@ class Tracker:
                     self.G.nodes[u]['pos_list'][-1] = rod_pose[:3, 3] + rod_pose[:3, 2] * self.rod_length / 2
                     self.G.nodes[v]['pos_list'][-1] = rod_pose[:3, 3] - rod_pose[:3, 2] * self.rod_length / 2
 
-                self.G.edges[u, v]['rendered_depth'] = rendered_depth
-                self.G.nodes[u]['pos_2d'], self.G.nodes[u]['roi_2d'] = self.get_end_cap_roi(u, radius=0.03)
-                self.G.nodes[v]['pos_2d'], self.G.nodes[v]['roi_2d'] = self.get_end_cap_roi(v, radius=0.03)
-                self.G.nodes[u]['confidence'] = confidence_u
-                self.G.nodes[v]['confidence'] = confidence_v
+            # ================================== correction step ==================================
 
-                if iter == max_iter - 1:
-                    if color == 'green':
-                        vis[rendered_depth > 0] = [0, 255, 0]
-                        cv2.imshow("green_obs", vis)
-                    elif color == 'blue':
-                        vis[rendered_depth > 0] = [255, 0, 0]
-                        cv2.imshow("blue_obs", vis)
-                    elif color == 'red':
-                        vis[rendered_depth > 0] = [0, 0, 255]
-                        cv2.imshow("red_obs", vis)
+            # render final depth and segmentation image
+            # for mesh_node, T in zip(mesh_nodes, T_list):
+            #     scene.set_pose(mesh_node, m @ T)
+            # rendered_seg, rendered_depth = self.renderer.render(scene, flags=RenderFlags.SEG, seg_node_map=seg_node_map)
+            # rendered_seg = rendered_seg[:, :, 0].copy()
 
-            # tic = time.time()
+            # confidence_u, confidence_v = self.compute_confidence(obs_depth_im, rendered_depth, rendered_seg,
+            #                                                      inlier_thresh=0.03)
+
             self.constrained_optimization(info)
             # print(f"optimization takes {time.time() - tic}s")
-
         return
 
-    def compute_mc2cam_mat(self, info):
-        cap_end_pos = list()
-        num_end_caps = 2 * self.data_cfg['num_rods']
-        for i in range(num_end_caps):
-            cap_end_pos.append(np.concatenate([self.G.nodes[i]['pos_list'][-1], [1.]]))
-        extr_mat = self.data_cfg['cam_extr']
-        cap_end_pos_in_cam_f = np.matmul(extr_mat, np.array(cap_end_pos).T)  # 4x6
-        cap_end_pos_in_mc_f = list()
-        mask_ids = list()
-        for i in range(num_end_caps):
-            pos = info['mocap'][str(i)]
-            if pos is None:
-                continue
-            mask_ids.append(i)
-            cap_end_pos_in_mc_f.append([pos['x']/1000., pos['y']/1000., pos['z']/1000.])
-        cap_end_pos_in_mc_f = np.array(cap_end_pos_in_mc_f).T  # 3x6
-        cap_end_pos_in_cam_f = cap_end_pos_in_cam_f[:, mask_ids]
 
-        P = cap_end_pos_in_cam_f[:3]
-        Q = cap_end_pos_in_mc_f
-        P_mean = P.mean(1, keepdims=True)  # (3, 1)
-        Q_mean = Q.mean(1, keepdims=True)  # (3, 1)
+    def create_scene_node(self, name, mesh, pose):
+        m = np.array([
+            [1, 0, 0, 0],
+            [0, -1, 0, 0],
+            [0, 0, -1, 0],
+            [0, 0, 0, 1]
+        ])
+        return pyrender.Node(name=name, mesh=mesh, matrix=m @ pose)
 
-        H = (Q - Q_mean) @ (P - P_mean).T
-        U, D, V = la.svd(H)
-        R = U @ V.T
-        t = Q_mean - R @ P_mean
 
-        cam2mc_mat = np.zeros((4, 4))
-        cam2mc_mat[0:3, 0:3] = R
-        cam2mc_mat[0:3, 3] = t.squeeze()
-        print(cam2mc_mat)
-        return cam2mc_mat
+    def render_nodes(self, seg_node_map: Dict[pyrender.Node, int], depth_only: bool = False):
+        for node in seg_node_map:
+            self.render_scene.add_node(node)
+
+        if depth_only:
+            rendered_depth = self.renderer.render(self.render_scene, flags=RenderFlags.DEPTH_ONLY)
+            for node in seg_node_map:
+                self.render_scene.remove_node(node)
+            return rendered_depth
+
+        rendered_seg, rendered_depth = self.renderer.render(self.render_scene, flags=RenderFlags.SEG,
+                                                            seg_node_map=seg_node_map)
+        rendered_seg = rendered_seg[:, :, 0]
+        for node in seg_node_map:
+            self.render_scene.remove_node(node)
+        return rendered_seg, rendered_depth
+
+
+    def render_current_state(self):
+        mapping = {'red': 1, 'green': 2, 'blue': 3}
+        seg_node_map = dict()
+        for color, (u, v) in self.data_cfg['color_to_rod'].items():
+            T = self.G.edges[u, v]['pose_list'][-1]
+            mesh_node = self.create_scene_node(f"{color}-mash", self.rod_mesh, pose=T)
+            seg_node_map[mesh_node] = mapping[color]
+        return self.render_nodes(seg_node_map)
+
 
     def compute_confidence(self, obs_depth_im, rendered_depth_im, rendered_seg_im, inlier_thresh=0.01):
         seg_gpu = torch.from_numpy(rendered_seg_im).cuda()
         obs_depth_gpu = torch.from_numpy(obs_depth_im).cuda()
         rendered_depth_gpu = torch.from_numpy(rendered_depth_im).cuda()
 
-        cam_intr = np.asarray(self.data_cfg['cam_intr'])
-        fx = cam_intr[0, 0]
-        fy = cam_intr[1, 1]
-        cx = cam_intr[0, 2]
-        cy = cam_intr[1, 2]
-
-        indices = torch.nonzero(obs_depth_gpu > 0)
-        ys, xs = indices[:, 0], indices[:, 1]
-        Z_obs = obs_depth_gpu[ys, xs]
-        X_obs = (xs - cx) / fx * Z_obs
-        Y_obs = (ys - cy) / fy * Z_obs
-        pts_obs = torch.stack([X_obs, Y_obs, Z_obs]).T  # (N, 3)
-
-        indices = np.nonzero(rendered_depth_gpu > 0)
-        r_ys = indices[:, 0]
-        r_xs = indices[:, 1]
-        Z_est = rendered_depth_gpu[r_ys, r_xs]
-        X_est = (r_xs - cx) / fx * Z_est
-        Y_est = (r_ys - cy) / fy * Z_est
-        pts_est = torch.stack([X_est, Y_est, Z_est]).T  # (M, 3)
-
+        pts_obs, _ = self.back_projection(obs_depth_gpu)
+        pts_est, (r_ys, r_xs) = self.back_projection(rendered_depth_gpu)
         pts_labels = seg_gpu[r_ys, r_xs]
         rendered_u = torch.sum(pts_labels == 1).cpu().item()
         rendered_v = torch.sum(pts_labels == 2).cpu().item()
@@ -401,6 +369,7 @@ class Tracker:
         matched_u = torch.sum(matched_labels == 1).cpu().item()
         matched_v = torch.sum(matched_labels == 2).cpu().item()
         return max(0.1, matched_u / rendered_u), max(0.1, matched_v / rendered_v)
+
 
     def constrained_optimization(self, info):
         rod_length = self.data_cfg['rod_length']
@@ -428,7 +397,9 @@ class Tracker:
         assert res.success, "Optimization fail! Something must be wrong."
 
         for i in range(num_end_caps):
-            self.G.nodes[i]['pos_list'][-1] = res.x[(3 * i):(3 * i + 3)].copy()
+            # sanity check in case the constraint optimization fails
+            if la.norm(res.x[(3 * i):(3 * i + 3)] - self.G.nodes[i]['pos_list'][-1]) < 0.1:
+                self.G.nodes[i]['pos_list'][-1] = res.x[(3 * i):(3 * i + 3)].copy()
 
         for color, (u, v) in self.data_cfg['color_to_rod'].items():
             prev_rod_pose = self.G.edges[u, v]['pose_list'][-1]
@@ -437,6 +408,7 @@ class Tracker:
             curr_end_cap_centers = np.vstack([u_pos, v_pos])
             optimized_pose = self.estimate_rod_pose_from_end_cap_centers(curr_end_cap_centers, prev_rod_pose)
             self.G.edges[u, v]['pose_list'][-1] = optimized_pose
+
 
     def objective_function_generator(self, sensor_measurement, sensor_status):
 
@@ -472,6 +444,7 @@ class Tracker:
 
         return objective_function
 
+
     def constraint_function_generator(self, u, v, rod_length):
 
         def constraint_function(X):
@@ -480,6 +453,7 @@ class Tracker:
             return la.norm(u_pos - v_pos) - rod_length
 
         return constraint_function
+
 
     def rigid_finetune(self, complete_obs_depth):
         mesh_nodes = []
@@ -499,6 +473,7 @@ class Tracker:
             self.G.nodes[u]['pos_list'][-1] = finetuned_pose[:3, 3] + finetuned_pose[:3, 2] * self.rod_length / 2
             self.G.nodes[v]['pos_list'][-1] = finetuned_pose[:3, 3] - finetuned_pose[:3, 2] * self.rod_length / 2
 
+
     def estimate_rod_pose_from_end_cap_centers(self, curr_end_cap_centers, prev_rod_pose=None):
         curr_rod_pos = (curr_end_cap_centers[0] + curr_end_cap_centers[1]) / 2
         curr_z_dir = curr_end_cap_centers[0] - curr_end_cap_centers[1]
@@ -517,168 +492,54 @@ class Tracker:
         curr_rod_pose[:3, 3] = curr_rod_pos
         return curr_rod_pose
 
-    def get_end_cap_roi(self, end_cap_id, radius=0.03):
-        pos_world = self.G.nodes[end_cap_id]['pos_list'][-1]
-        X, Y, Z = pos_world
-        pos_cam = self.data_cfg['cam_extr'] @ np.array([X, Y, Z, 1])
-        X, Y, Z = pos_cam[:3]
 
-        cam_intr = np.asarray(self.data_cfg['cam_intr'])
-        fx = cam_intr[0, 0]
-        fy = cam_intr[1, 1]
-        cx = cam_intr[0, 2]
-        cy = cam_intr[1, 2]
+    def projective_icp_cuda(self, pts_obs, mesh_nodes, init_pose, max_distance=0.02, verbose=False):
+        rendered_depth_im = self.render_nodes(mesh_nodes, depth_only=True)
+        rendered_depth_im_gpu = torch.from_numpy(rendered_depth_im).cuda()
+        pts_est, _ = self.back_projection(rendered_depth_im_gpu)
 
-        corner_pts = np.array([
-            [X, Y, Z, 1],
-            [X - radius, Y - radius, Z - radius, 1],
-            [X - radius, Y - radius, Z + radius, 1],
-            [X + radius, Y - radius, Z - radius, 1],
-            [X + radius, Y - radius, Z + radius, 1],
-            [X - radius, Y + radius, Z - radius, 1],
-            [X - radius, Y + radius, Z + radius, 1],
-            [X + radius, Y + radius, Z - radius, 1],
-            [X + radius, Y + radius, Z + radius, 1],
-        ])
+        # nearest neighbor data association
+        distances = torch.norm(pts_obs.unsqueeze(1) - pts_est.unsqueeze(0), dim=2)  # (N, M)
+        closest_distance, closest_indices = torch.min(distances, dim=1)
+        dist_mask = closest_distance < max_distance
 
-        xs = (fx * corner_pts[:, 0] / corner_pts[:, 2] + cx).astype(np.int32)
-        ys = (fy * corner_pts[:, 1] / corner_pts[:, 2] + cy).astype(np.int32)
-        x_min, x_max = np.min(xs), np.max(xs)
-        y_min, y_max = np.min(ys), np.max(ys)
-        return (xs[0], ys[0]), (x_min, y_min, x_max, y_max)
+        # ICP ref: https://www.youtube.com/watch?v=djnd502836w&t=781s
+        Q = pts_obs[dist_mask].T  # (3, K)
+        P = pts_est[closest_indices][dist_mask].T  # (3, K)
 
-    def projective_icp_cuda(self, depth_im, mesh_nodes, init_poses, max_iter=30, max_distance=0.02,
-                            early_stop_thresh=0.0015, verbose=False):
-        cam_intr = np.asarray(self.data_cfg['cam_intr'])
-        fx = cam_intr[0, 0]
-        fy = cam_intr[1, 1]
-        cx = cam_intr[0, 2]
-        cy = cam_intr[1, 2]
+        P_mean = P.mean(1, keepdims=True)  # (3, 1)
+        Q_mean = Q.mean(1, keepdims=True)  # (3, 1)
 
-        camera = pyrender.IntrinsicsCamera(fx=fx, fy=fy, cx=cx, cy=cy)
-        light = pyrender.SpotLight(color=np.ones(3), intensity=3.0, innerConeAngle=np.pi / 16.0)
-        camera_node = pyrender.Node(name='cam', camera=camera, matrix=np.eye(4))
-        light_node = pyrender.Node(name='light', light=light, matrix=np.eye(4))
-        scene = pyrender.Scene(nodes=[camera_node, light_node])
-        seg_node_map = dict()
-        for i, mesh_node in enumerate(mesh_nodes):
-            scene.add_node(mesh_node)
-            seg_node_map[mesh_node] = i + 1
+        H = (Q - Q_mean) @ (P - P_mean).T
+        U, D, V = torch.svd(H)
+        R = U @ V.T
+        t = Q_mean - R @ P_mean
 
-        m = np.array([
-            [1, 0, 0, 0],
-            [0, -1, 0, 0],
-            [0, 0, -1, 0],
-            [0, 0, 0, 1]
-        ])
-
-        depth_im = torch.from_numpy(depth_im).cuda()
-        indices = torch.nonzero(depth_im > 0)
-        ys = indices[:, 0]
-        xs = indices[:, 1]
-        Z_obs = depth_im[ys, xs]
-        X_obs = (xs - cx) / fx * Z_obs
-        Y_obs = (ys - cy) / fy * Z_obs
-        pts_obs = torch.stack([X_obs, Y_obs, Z_obs]).T  # (N, 3)
-
-        T_list = [pose.copy() for pose in init_poses]
-
-        for _ in range(max_iter):
-            for mesh_node, T in zip(mesh_nodes, T_list):
-                scene.set_pose(mesh_node, m @ T)
-
-            rendered_depth_im = self.renderer.render(scene, flags=RenderFlags.DEPTH_ONLY)
-            rendered_depth_im_gpu = torch.from_numpy(rendered_depth_im).cuda()
-
-            indices = np.nonzero(rendered_depth_im_gpu > 0)
-            r_ys = indices[:, 0]
-            r_xs = indices[:, 1]
-            Z_est = rendered_depth_im_gpu[r_ys, r_xs]
-            X_est = (r_xs - cx) / fx * Z_est
-            Y_est = (r_ys - cy) / fy * Z_est
-            pts_est = torch.stack([X_est, Y_est, Z_est]).T  # (M, 3)
-
-            # nearest neighbor data association
-            distances = torch.norm(pts_obs.unsqueeze(1) - pts_est.unsqueeze(0), dim=2)  # (N, M)
-            closest_distance, closest_indices = torch.min(distances, dim=1)
-            dist_mask = closest_distance < max_distance
-
-            # ICP ref: https://www.youtube.com/watch?v=djnd502836w&t=781s
-            Q = pts_obs[dist_mask].T  # (3, K)
-            P = pts_est[closest_indices][dist_mask].T  # (3, K)
-
-            P_mean = P.mean(1, keepdims=True)  # (3, 1)
-            Q_mean = Q.mean(1, keepdims=True)  # (3, 1)
-
+        if verbose:
             error_before = torch.mean(torch.norm(Q - P, dim=0)).item()
-
-            H = (Q - Q_mean) @ (P - P_mean).T
-            U, D, V = torch.svd(H)
-            R = U @ V.T
-            t = Q_mean - R @ P_mean
-
             error_after = torch.mean(torch.norm(Q - (R @ P + t), dim=0)).item()
-            if verbose:
-                print(f"{error_before = :.4f}, {error_after = :.4f}, delta = {error_before - error_after:.4f}")
+            print(f"{error_before = :.4f}, {error_after = :.4f}, delta = {error_before - error_after:.4f}")
 
-            if error_after > error_before:
-                break
-
-            delta_T = np.eye(4)
-            delta_T[:3, :3] = R.cpu().numpy()
-            delta_T[:3, 3:4] = t.cpu().numpy()
-
-            for i in range(len(T_list)):
-                T_list[i] = delta_T @ T_list[i]
-
-            if error_after < early_stop_thresh:
-                break
-
-        # render final depth and segmentation image
-        for mesh_node, T in zip(mesh_nodes, T_list):
-            scene.set_pose(mesh_node, m @ T)
-        rendered_seg, rendered_depth = self.renderer.render(scene, flags=RenderFlags.SEG, seg_node_map=seg_node_map)
-        rendered_seg = rendered_seg[:, :, 0].copy()
-
-        return T_list, rendered_depth, rendered_seg
-
-
-def visualize(data_cfg, pcd, visualizer):
-    visualizer.clear_geometries()
-    visualizer.add_geometry(pcd)
-
-    # Due to a potential bug in Open3D, cx, cy can only be w / 2 - 0.5, h / 2 - 0.5
-    # https://github.com/intel-isl/Open3D/issues/1164
-    cam_intr_vis = o3d.camera.PinholeCameraIntrinsic()
-    cam_intr = np.array(data_cfg['cam_intr'])
-    fx, fy = cam_intr[0, 0], cam_intr[1, 1]
-    cx, cy = data_cfg['im_w'] / 2 - 0.5, data_cfg['im_h'] / 2 - 0.5
-    cam_intr_vis.set_intrinsics(data_cfg['im_w'], data_cfg['im_h'], fx, fy, cx, cy)
-    cam_params = o3d.camera.PinholeCameraParameters()
-    cam_params.intrinsic = cam_intr_vis
-    cam_params.extrinsic = data_cfg['cam_extr']
-
-    visualizer.get_view_control().convert_from_pinhole_camera_parameters(cam_params)
-    visualizer.poll_events()
-    visualizer.update_renderer()
+        delta_T = np.eye(4)
+        delta_T[:3, :3] = R.cpu().numpy()
+        delta_T[:3, 3:4] = t.cpu().numpy()
+        return delta_T @ init_pose
 
 
 if __name__ == '__main__':
     parser = ArgumentParser()
     parser.add_argument("--dataset", default="dataset")
-    # parser.add_argument("--video_id", default="fabric2")
-    # parser.add_argument("--video_id", default="six_cameras10")
+    # parser.add_argument("--video_id", default="nocon5")
     # parser.add_argument("--video_id", default="crawling_sim")
-    # parser.add_argument("--video_id", default="socks6")
-    parser.add_argument("--video_id", default="dynamic")
-    # parser.add_argument("--rod_mesh_file", default="pcd/yale/untethered_rod_w_end_cap.ply")
-    parser.add_argument("--rod_mesh_file", default="pcd/yale/end_cap_only_new.obj")
+    parser.add_argument("--video_id", default="socks6")
+    # parser.add_argument("--video_id", default="dummy")
+    parser.add_argument("--rod_mesh_file", default="pcd/yale/untethered_rod_w_end_cap.ply")
+    # parser.add_argument("--rod_mesh_file", default="pcd/yale/end_cap_only_new.obj")
     parser.add_argument("--top_end_cap_mesh_file", default="pcd/yale/end_cap_top.obj")
     parser.add_argument("--bottom_end_cap_mesh_file", default="pcd/yale/end_cap_bottom.obj")
-    parser.add_argument("--rod_pcd_file", default="pcd/yale/untethered_rod_w_end_cap.pcd")
-    parser.add_argument("--first_frame_id", default=20, type=int)
+    parser.add_argument("--first_frame_id", default=50, type=int)
     parser.add_argument("--max_iter", default=5, type=int)
-    parser.add_argument("-v", "--visualize", default=True, action="store_true")
+    parser.add_argument("-v", "--visualize", default=False, action="store_true")
     args = parser.parse_args()
 
     video_path = os.path.join(args.dataset, args.video_id)
@@ -688,38 +549,31 @@ if __name__ == '__main__':
     data_cfg_module = importlib.import_module(f'{args.dataset}.{args.video_id}.config')
     data_cfg = data_cfg_module.get_config(read_cfg=True)
 
-    # read rod pcd
-    assert os.path.isfile(args.rod_mesh_file) or os.path.isfile(args.rod_pcd_file), "rod geometry is not found!"
-    if os.path.isfile(args.rod_pcd_file):
-        print(f"read rod pcd from {args.rod_pcd_file}")
-        rod_pcd = o3d.io.read_point_cloud(args.rod_pcd_file)
-    else:
-        print(f"read rod triangle mesh from {args.rod_mesh_file}")
-        rod_mesh = o3d.io.read_triangle_mesh(args.rod_mesh_file)
-        rod_pcd = rod_mesh.sample_points_poisson_disk(3000)
-        points = np.asarray(rod_pcd.points)
-        offset = points.mean(0)
-        points -= offset  # move point cloud center
-        points /= data_cfg['rod_scale']  # scale points from millimeter to meter
-        pcd_path = ".".join(args.rod_mesh_file.split('.')[:-1]) + ".pcd"
-        o3d.io.write_point_cloud(pcd_path, rod_pcd)
-        print(f"rod pcd file is generated and saved to {pcd_path}")
+    # read rod point cloud
+    assert os.path.isfile(args.rod_mesh_file), "rod geometry is not found!"
+    rod_mesh_o3d = o3d.io.read_triangle_mesh(args.rod_mesh_file)
+    rod_pcd = rod_mesh_o3d.sample_points_poisson_disk(1000)
+    points = np.asarray(rod_pcd.points)
+    offset = points.mean(0)
+    points -= offset  # move point cloud center
+    points /= data_cfg['rod_scale']  # scale points from millimeter to meter
 
-    # read rod triangle mesh
-    # rod_fuze_mesh = trimesh.load_mesh(args.rod_mesh_file)
-    # print(rod_fuze_mesh.centroid)
-    # rod_fuze_mesh.apply_translation(-rod_fuze_mesh.centroid)
-    # rod_fuze_mesh.apply_scale(1 / data_cfg['rod_scale'])
-    # rod_mesh = pyrender.Mesh.from_trimesh(rod_fuze_mesh)
-
+    # read rod and end cap trimesh for for rendering
+    rod_fuze_mesh = trimesh.load_mesh(args.rod_mesh_file)
+    rod_fuze_mesh.apply_translation(-offset)
+    rod_fuze_mesh.apply_scale(1 / data_cfg['rod_scale'])
+    rod_mesh = pyrender.Mesh.from_trimesh(rod_fuze_mesh)
     top_end_cap_mesh = pyrender.Mesh.from_trimesh(trimesh.load_mesh(args.top_end_cap_mesh_file))
     bottom_end_cap_mesh = pyrender.Mesh.from_trimesh(trimesh.load_mesh(args.bottom_end_cap_mesh_file))
-    tracker = Tracker(data_cfg, rod_pcd, [top_end_cap_mesh, bottom_end_cap_mesh])
+
+    # initialize tracker
+    tracker = Tracker(data_cfg, rod_pcd, rod_mesh, [top_end_cap_mesh, bottom_end_cap_mesh])
 
     # initialize tracker with the first frame
     color_path = os.path.join(video_path, 'color', f'{prefixes[args.first_frame_id]}.png')
     depth_path = os.path.join(video_path, 'depth', f'{prefixes[args.first_frame_id]}.png')
     info_path = os.path.join(video_path, 'data', f'{prefixes[args.first_frame_id]}.json')
+    # color_im = cv2.imread(color_path)
     color_im = cv2.cvtColor(cv2.imread(color_path), cv2.COLOR_BGR2RGB)
     depth_im = cv2.imread(depth_path, cv2.IMREAD_UNCHANGED).astype(np.float32) / data_cfg['depth_scale']
     with open(info_path, 'r') as f:
@@ -739,16 +593,16 @@ if __name__ == '__main__':
     os.makedirs(os.path.join(video_path, "raw_estimation"), exist_ok=True)
 
     if args.visualize:
-        visualizer = o3d.visualization.Visualizer()
-        visualizer.create_window(width=data_cfg['im_w'], height=data_cfg['im_h'])
-        cv2.namedWindow("observation")
-        cv2.moveWindow("observation", 800, 100)
-        cv2.namedWindow("red_obs")
-        cv2.moveWindow("red_obs", 100, 600)
-        cv2.namedWindow("blue_obs")
-        cv2.moveWindow("blue_obs", 800, 600)
-        cv2.namedWindow("green_obs")
-        cv2.moveWindow("green_obs", 1500, 600)
+        cv2.namedWindow("estimation")
+        cv2.moveWindow("estimation", 800, 100)
+        rendered_seg, rendered_depth = tracker.render_current_state()
+        vis_im = np.copy(color_im)
+        for i, color in enumerate(['red', 'green', 'blue']):
+            mask = rendered_depth.copy()
+            mask[rendered_seg != i + 1] = 0
+            vis_im[depth_im < mask] = Tracker.ColorDict[color]
+        cv2.imshow("estimation", cv2.cvtColor(vis_im, cv2.COLOR_RGB2BGR))
+        key = cv2.waitKey(0)
 
     for idx in tqdm(range(args.first_frame_id + 1, len(prefixes))):
         prefix = prefixes[idx]
@@ -756,8 +610,8 @@ if __name__ == '__main__':
         depth_path = os.path.join(video_path, 'depth', f'{prefix}.png')
         info_path = os.path.join(video_path, 'data', f'{prefix}.json')
 
-        color_im_bgr = cv2.imread(color_path)
-        color_im = cv2.cvtColor(color_im_bgr, cv2.COLOR_BGR2RGB)
+        # color_im = cv2.imread(color_path)
+        color_im = cv2.cvtColor(cv2.imread(color_path), cv2.COLOR_BGR2RGB)
         depth_im = cv2.imread(depth_path, cv2.IMREAD_UNCHANGED).astype(np.float32) / data_cfg['depth_scale']
         with open(info_path, 'r') as f:
             info = json.load(f)
@@ -770,28 +624,32 @@ if __name__ == '__main__':
         tracker.update(color_im, depth_im, info, args.max_iter)
 
         if args.visualize:
-            scene_pcd = perception_utils.create_pcd(depth_im, data_cfg['cam_intr'], color_im,
-                                                    depth_trunc=data_cfg['depth_trunc'],
-                                                    cam_extr=data_cfg['cam_extr'])
+            rendered_seg, rendered_depth = tracker.render_current_state()
+            vis_im = np.copy(color_im)
+            for i, color in enumerate(['red', 'green', 'blue']):
+                mask = rendered_depth.copy()
+                mask[rendered_seg != i + 1] = 0
+                vis_im[depth_im < mask] = Tracker.ColorDict[color]
 
-            robot_cloud = o3d.geometry.PointCloud()
-            for color, (u, v) in data_cfg['color_to_rod'].items():
-                rod_pcd = copy.deepcopy(tracker.rod_pcd)
-                rod_pcd = rod_pcd.paint_uniform_color(np.array(Tracker.ColorDict[color]) / 255)
-                rod_pose = tracker.G.edges[u, v]['pose_list'][-1]
-                rod_pcd.transform(rod_pose)
-                robot_cloud += rod_pcd
-
-            estimation_cloud = robot_cloud + scene_pcd
-            visualize(data_cfg, estimation_cloud, visualizer)
-            visualizer.capture_screen_image(os.path.join(video_path, "raw_estimation", f"{idx:04d}.png"))
-            o3d.io.write_point_cloud(os.path.join(video_path, "scene_cloud", f"{idx:04d}.ply"), scene_pcd)
-            # o3d.io.write_point_cloud(os.path.join(video_path, "estimation_cloud", f"{idx:04d}.ply"), estimation_cloud)
-
-            cv2.imshow("observation", color_im_bgr)
+            cv2.imshow("estimation", cv2.cvtColor(vis_im, cv2.COLOR_RGB2BGR))
             key = cv2.waitKey(1)
             if key == ord('q'):
                 exit(0)
+
+            # scene_pcd = perception_utils.create_pcd(depth_im, data_cfg['cam_intr'], color_im,
+            #                                         depth_trunc=data_cfg['depth_trunc'])
+
+            # robot_cloud = o3d.geometry.PointCloud()
+            # for color, (u, v) in data_cfg['color_to_rod'].items():
+            #     rod_pcd = copy.deepcopy(tracker.rod_pcd)
+            #     rod_pcd = rod_pcd.paint_uniform_color(np.array(Tracker.ColorDict[color]) / 255)
+            #     rod_pose = copy.deepcopy(tracker.G.edges[u, v]['pose_list'][-1])
+            #     rod_pcd.transform(rod_pose)
+            #     robot_cloud += rod_pcd
+
+            # estimation_cloud = robot_cloud + scene_pcd
+            # o3d.io.write_point_cloud(os.path.join(video_path, "scene_cloud", f"{idx:04d}.ply"), scene_pcd)
+            # o3d.io.write_point_cloud(os.path.join(video_path, "estimation_cloud", f"{idx:04d}.ply"), estimation_cloud)
 
     # save rod poses and end cap positions to file
     pose_output_folder = os.path.join(video_path, "poses")
