@@ -21,6 +21,7 @@ from pyrender.constants import RenderFlags
 
 import perception_utils
 
+nodes_on_ground = [0, 2, 5]
 
 class Tracker:
     ColorDict = {
@@ -174,6 +175,10 @@ class Tracker:
                 # o3d.visualization.draw_geometries([end_cap_pcd])
 
                 end_cap_center = np.asarray(end_cap_pcd.points).mean(axis=0)
+
+                if node in nodes_on_ground:
+                    end_cap_center[2] = 0.015
+
                 end_cap_centers.append(end_cap_center)
 
                 complete_obs_mask |= mask
@@ -430,6 +435,9 @@ class Tracker:
         for i in range(num_end_caps):
             self.G.nodes[i]['pos_list'][-1] = res.x[(3 * i):(3 * i + 3)].copy()
 
+            if i in nodes_on_ground:
+                self.G.nodes[i]['pos_list'][-1][2] = 0.015
+
         for color, (u, v) in self.data_cfg['color_to_rod'].items():
             prev_rod_pose = self.G.edges[u, v]['pose_list'][-1]
             u_pos = self.G.nodes[u]['pos_list'][-1]
@@ -445,6 +453,8 @@ class Tracker:
             for i in range(len(self.data_cfg['node_to_color'])):
                 pos = X[(3 * i):(3 * i + 3)]
                 estimated_pos = self.G.nodes[i]['pos_list'][-1]
+                if i in nodes_on_ground:
+                    estimated_pos[2] = 0.015
                 confidence = self.G.nodes[i].get('confidence', 1)
                 unary_loss += confidence * np.sum((pos - estimated_pos)**2)
 
@@ -468,7 +478,12 @@ class Tracker:
                 measured_length = sensor_measurement[sensor_id]['length'] / 100
                 binary_loss += factor * (estimated_length - measured_length)**2
 
-            return unary_loss + binary_loss
+            on_ground_loss = 0
+            for i in range(len(self.data_cfg['node_to_color'])):
+                pos = X[(3 * i):(3 * i + 3)]
+                if i in nodes_on_ground:
+                    on_ground_loss += (pos[2] - 0.0015)**2
+            return unary_loss + binary_loss + on_ground_loss * 10
 
         return objective_function
 
