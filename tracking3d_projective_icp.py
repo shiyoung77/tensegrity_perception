@@ -458,6 +458,8 @@ class Tracker:
                 confidence = self.G.nodes[i].get('confidence', 1)
                 unary_loss += confidence * np.sum((pos - estimated_pos)**2)
 
+            unary_loss *= 0.1
+
             binary_loss = 0
             for sensor_id, (u, v) in self.data_cfg['sensor_to_tendon'].items():
                 sensor_id = str(sensor_id)
@@ -477,6 +479,8 @@ class Tracker:
                 estimated_length = la.norm(u_pos - v_pos)
                 measured_length = sensor_measurement[sensor_id]['length'] / 100
                 binary_loss += factor * (estimated_length - measured_length)**2
+
+            # binary_loss *= 0.1
 
             on_ground_loss = 0
             for i in range(len(self.data_cfg['node_to_color'])):
