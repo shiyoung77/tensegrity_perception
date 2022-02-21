@@ -21,7 +21,8 @@ from pyrender.constants import RenderFlags
 
 import perception_utils
 
-nodes_on_ground = [0, 2, 5]
+# nodes_on_ground = [0, 2, 5]
+nodes_on_ground = []
 
 class Tracker:
     ColorDict = {
@@ -429,6 +430,28 @@ class Tracker:
             constraint['fun'] = self.constraint_function_generator(u, v, rod_length)
             rod_constraints.append(constraint)
 
+        # between rods constraints
+        between_rod_constraints = []
+        # n_rod = self.data_cfg['num_rods']
+        # for i in range(n_rod):
+        #     for j in range(i + 1, n_rod):
+        #         pre_pos1, pre_pos2 = self.get_perpendicular_vector(i, j, -1)
+        #         if pre_pos1 is None or pre_pos2 is None:
+        #             continue
+        #
+        #         pre_length = np.linalg.norm(pre_pos2 - pre_pos1)
+        #         if pre_length > self.data_cfg['rod_length']:
+        #             continue
+        #
+        #         rod_r = 0.0051  # rod radius
+        #         if cur_length < rod_r * 2:
+        #             relation_loss += 1000
+        #
+        #         pre_direction = pre_pos2 - pre_pos1
+        #         cur_direction = cur_pos2 - cur_pos1
+        #         if np.dot(pre_direction, cur_direction) <= 0:  #
+        #             relation_loss += 1000
+
         res = minimize(obj_func, init_values, method='SLSQP', constraints=rod_constraints)
         assert res.success, "Optimization fail! Something must be wrong."
 
@@ -445,6 +468,51 @@ class Tracker:
             curr_end_cap_centers = np.vstack([u_pos, v_pos])
             optimized_pose = self.estimate_rod_pose_from_end_cap_centers(curr_end_cap_centers, prev_rod_pose)
             self.G.edges[u, v]['pose_list'][-1] = optimized_pose
+
+    def get_perpendicular_vector(self, i, j, t=None, X=None):
+        rods_color = list(self.data_cfg['color_to_rod'].keys())
+        u_i, v_i = self.data_cfg['color_to_rod'][rods_color[i]]
+        if t is not None:
+            pos_u_i = self.G.nodes[u_i]['pos_list'][t]
+            pos_v_i = self.G.nodes[v_i]['pos_list'][t]
+        elif X is not None:
+            pos_u_i = X[(3 * u_i):(3 * u_i + 3)]
+            pos_v_i = X[(3 * v_i):(3 * v_i + 3)]
+        else:
+            raise ValueError
+        vec_i = pos_v_i - pos_u_i
+        vec_i = vec_i / np.linalg.norm(vec_i)
+
+        u_j, v_j = self.data_cfg['color_to_rod'][rods_color[j]]
+        if t is not None:
+            pos_u_j = self.G.nodes[u_j]['pos_list'][t]
+            pos_v_j = self.G.nodes[v_j]['pos_list'][t]
+        elif X is not None:
+            pos_u_j = X[(3 * u_j):(3 * u_j + 3)]
+            pos_v_j = X[(3 * v_j):(3 * v_j + 3)]
+        else:
+            raise ValueError
+        vec_j = pos_v_j - pos_u_j
+        vec_j = vec_j / np.linalg.norm(vec_j)
+        # not parallel
+        if np.isclose(abs(np.dot(vec_i, vec_j)), 1, atol=1e-3):
+            return None, None
+        perpend_vec = np.cross(vec_i, vec_j)
+        perpend_vec = perpend_vec / np.linalg.norm(perpend_vec)
+
+        # https://math.stackexchange.com/questions/1993953/closest-points-between-two-lines/3334866#3334866
+        # pos_u_i + t1 * vec_i + t3 * perp_vec = pos_u_j + t2 * vec_j
+        # solve t1, t2, t3
+        # [vec_i, -vec_j, perp_vec] [t1, t2, t3].T = pos_u_j - pos_u_i
+        A = np.array([vec_i, -vec_j, perpend_vec]).T
+        b = pos_u_j - pos_u_i
+        t1, t2, t3 = np.linalg.solve(A, b)
+
+        pos1 = pos_u_i + t1 * vec_i
+        pos2 = pos_u_j + t2 * vec_j
+        assert np.isclose(np.linalg.norm(pos2 - pos1), abs(t3))
+        # return the two end point of the perpendicular vector
+        return pos1, pos2
 
     def objective_function_generator(self, sensor_measurement, sensor_status):
 
@@ -489,44 +557,31 @@ class Tracker:
                 if i in nodes_on_ground:
                     grounding_loss += (pos[2] - 0.0015)**2
 
-            # get perpendicular vector
-
-            def get_perpendicular_vector(i, j, t):
-                rods_color = list(self.data_cfg['color_to_rod'].keys())
-                u_i, v_i = self.data_cfg['color_to_rod'][rods_color[i]]
-                if len(self.G.nodes[u_i]['pos_list']) < 2:
-                    return None
-                pre_pos_u_i = self.G.nodes[u_i]['pos_list'][t]
-                pre_pos_v_i = self.G.nodes[v_i]['pos_list'][t]
-                pre_vec_i = pre_pos_v_i - pre_pos_u_i
-                pre_vec_i = pre_vec_i / np.linalg.norm(pre_vec_i)
-
-                u_j, v_j = self.data_cfg['color_to_rod'][rods_color[j]]
-                pre_pos_u_j = self.G.nodes[u_j]['pos_list'][t]
-                pre_pos_v_j = self.G.nodes[v_j]['pos_list'][t]
-                pre_vec_j = pre_pos_v_j - pre_pos_u_j
-                pre_vec_j = pre_vec_j / np.linalg.norm(pre_vec_j)
-                # not parallel
-                if np.isclose(abs(np.dot(pre_vec_i, pre_vec_j)), 1, atol=1e-3):
-                    return None
-
-
-
-                perpend_vec = np.cross(pre_vec_j, pre_vec_i)
-                return perpend_vec
-
             # rod relation loss
             relation_loss = 0
             rods_color = list(self.data_cfg['color_to_rod'].keys())
             n_rod = len(rods_color)
             for i in range(n_rod):
                 for j in range(i+1, n_rod):
-                    pre_perpend_vec = get_perpendicular_vector(i, j, -2)
-                    cur_perpend_vec = get_perpendicular_vector(i, j, -1)
-                    if pre_perpend_vec is None:
+                    pre_pos1, pre_pos2 = self.get_perpendicular_vector(i, j, t=-1)
+                    cur_pos1, cur_pos2 = self.get_perpendicular_vector(i, j, X=X)
+                    if pre_pos1 is None or cur_pos1 is None:
                         continue
-                    if pre_perpend_vec.dot(cur_perpend_vec) < 0:
+
+                    pre_length = np.linalg.norm(pre_pos2 - pre_pos1)
+                    cur_length = np.linalg.norm(cur_pos2 - cur_pos1)
+                    if pre_length > self.data_cfg['rod_length'] or cur_length > self.data_cfg['rod_length']:
+                        continue
+
+                    rod_r = 0.0051 # rod radius
+                    if cur_length < rod_r*2:
                         relation_loss += 1000
+
+                    pre_direction = pre_pos2 - pre_pos1
+                    cur_direction = cur_pos2 - cur_pos1
+                    if np.dot(pre_direction, cur_direction) <= 0: #
+                        relation_loss += 1000
+            relation_loss = 0
             return unary_loss + binary_loss + grounding_loss * 10 + relation_loss
 
         return objective_function
