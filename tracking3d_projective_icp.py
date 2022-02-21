@@ -482,12 +482,52 @@ class Tracker:
 
             # binary_loss *= 0.1
 
-            on_ground_loss = 0
+            # grounding loss
+            grounding_loss = 0
             for i in range(len(self.data_cfg['node_to_color'])):
                 pos = X[(3 * i):(3 * i + 3)]
                 if i in nodes_on_ground:
-                    on_ground_loss += (pos[2] - 0.0015)**2
-            return unary_loss + binary_loss + on_ground_loss * 10
+                    grounding_loss += (pos[2] - 0.0015)**2
+
+            # get perpendicular vector
+
+            def get_perpendicular_vector(i, j, t):
+                rods_color = list(self.data_cfg['color_to_rod'].keys())
+                u_i, v_i = self.data_cfg['color_to_rod'][rods_color[i]]
+                if len(self.G.nodes[u_i]['pos_list']) < 2:
+                    return None
+                pre_pos_u_i = self.G.nodes[u_i]['pos_list'][t]
+                pre_pos_v_i = self.G.nodes[v_i]['pos_list'][t]
+                pre_vec_i = pre_pos_v_i - pre_pos_u_i
+                pre_vec_i = pre_vec_i / np.linalg.norm(pre_vec_i)
+
+                u_j, v_j = self.data_cfg['color_to_rod'][rods_color[j]]
+                pre_pos_u_j = self.G.nodes[u_j]['pos_list'][t]
+                pre_pos_v_j = self.G.nodes[v_j]['pos_list'][t]
+                pre_vec_j = pre_pos_v_j - pre_pos_u_j
+                pre_vec_j = pre_vec_j / np.linalg.norm(pre_vec_j)
+                # not parallel
+                if np.isclose(abs(np.dot(pre_vec_i, pre_vec_j)), 1, atol=1e-3):
+                    return None
+
+
+
+                perpend_vec = np.cross(pre_vec_j, pre_vec_i)
+                return perpend_vec
+
+            # rod relation loss
+            relation_loss = 0
+            rods_color = list(self.data_cfg['color_to_rod'].keys())
+            n_rod = len(rods_color)
+            for i in range(n_rod):
+                for j in range(i+1, n_rod):
+                    pre_perpend_vec = get_perpendicular_vector(i, j, -2)
+                    cur_perpend_vec = get_perpendicular_vector(i, j, -1)
+                    if pre_perpend_vec is None:
+                        continue
+                    if pre_perpend_vec.dot(cur_perpend_vec) < 0:
+                        relation_loss += 1000
+            return unary_loss + binary_loss + grounding_loss * 10 + relation_loss
 
         return objective_function
 
