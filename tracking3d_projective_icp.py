@@ -576,12 +576,12 @@ class Tracker:
 
                     rod_r = 0.0051 # rod radius
                     if cur_length < rod_r*2:
-                        relation_loss += 100
+                        relation_loss += 10
 
                     pre_direction = pre_pos2 - pre_pos1
                     cur_direction = cur_pos2 - cur_pos1
                     if np.dot(pre_direction, cur_direction) <= 0: #
-                        relation_loss += 100
+                        relation_loss += 10
             # relation_loss = 0
             return unary_loss + binary_loss + grounding_loss * 10 + relation_loss
 
@@ -784,15 +784,15 @@ if __name__ == '__main__':
     # parser.add_argument("--video_id", default="fabric2")
     # parser.add_argument("--video_id", default="six_cameras10")
     # parser.add_argument("--video_id", default="crawling_sim")
-    # parser.add_argument("--video_id", default="socks6")
-    parser.add_argument("--video_id", default="dynamic")
+    parser.add_argument("--video_id", default="socks6")
+    # parser.add_argument("--video_id", default="dynamic")
     # parser.add_argument("--rod_mesh_file", default="pcd/yale/untethered_rod_w_end_cap.ply")
     parser.add_argument("--rod_mesh_file", default="pcd/yale/end_cap_only_new.obj")
     parser.add_argument("--top_end_cap_mesh_file", default="pcd/yale/end_cap_top.obj")
     parser.add_argument("--bottom_end_cap_mesh_file", default="pcd/yale/end_cap_bottom.obj")
     parser.add_argument("--rod_pcd_file", default="pcd/yale/untethered_rod_w_end_cap.pcd")
-    parser.add_argument("--first_frame_id", default=20, type=int)
-    # parser.add_argument("--first_frame_id", default=50, type=int)
+    # parser.add_argument("--first_frame_id", default=20, type=int)
+    parser.add_argument("--first_frame_id", default=50, type=int)
     parser.add_argument("--max_iter", default=5, type=int)
     parser.add_argument("-v", "--visualize", default=True, action="store_true")
     args = parser.parse_args()
