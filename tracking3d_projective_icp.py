@@ -571,8 +571,8 @@ class Tracker:
 
                     pre_length = np.linalg.norm(pre_pos2 - pre_pos1)
                     cur_length = np.linalg.norm(cur_pos2 - cur_pos1)
-                    if pre_length > self.data_cfg['rod_length'] or cur_length > self.data_cfg['rod_length']:
-                        continue
+                    # if pre_length > self.data_cfg['rod_length'] or cur_length > self.data_cfg['rod_length']:
+                    #     continue
 
                     rod_r = 0.0051 # rod radius
                     if cur_length < rod_r*2:
