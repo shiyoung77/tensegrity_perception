@@ -526,7 +526,7 @@ class Tracker:
                 confidence = self.G.nodes[i].get('confidence', 1)
                 unary_loss += confidence * np.sum((pos - estimated_pos)**2)
 
-            unary_loss *= 0.1
+            # unary_loss *= 0.1
 
             binary_loss = 0
             for sensor_id, (u, v) in self.data_cfg['sensor_to_tendon'].items():
@@ -556,6 +556,7 @@ class Tracker:
                 pos = X[(3 * i):(3 * i + 3)]
                 if i in nodes_on_ground:
                     grounding_loss += (pos[2] - 0.0015)**2
+            grounding_loss = 0
 
             # rod relation loss
             relation_loss = 0
@@ -581,7 +582,7 @@ class Tracker:
                     cur_direction = cur_pos2 - cur_pos1
                     if np.dot(pre_direction, cur_direction) <= 0: #
                         relation_loss += 1000
-            relation_loss = 0
+            # relation_loss = 0
             return unary_loss + binary_loss + grounding_loss * 10 + relation_loss
 
         return objective_function
@@ -783,14 +784,14 @@ if __name__ == '__main__':
     # parser.add_argument("--video_id", default="fabric2")
     # parser.add_argument("--video_id", default="six_cameras10")
     # parser.add_argument("--video_id", default="crawling_sim")
-    # parser.add_argument("--video_id", default="socks6")
-    parser.add_argument("--video_id", default="dynamic")
+    parser.add_argument("--video_id", default="socks6")
+    # parser.add_argument("--video_id", default="dynamic")
     # parser.add_argument("--rod_mesh_file", default="pcd/yale/untethered_rod_w_end_cap.ply")
     parser.add_argument("--rod_mesh_file", default="pcd/yale/end_cap_only_new.obj")
     parser.add_argument("--top_end_cap_mesh_file", default="pcd/yale/end_cap_top.obj")
     parser.add_argument("--bottom_end_cap_mesh_file", default="pcd/yale/end_cap_bottom.obj")
     parser.add_argument("--rod_pcd_file", default="pcd/yale/untethered_rod_w_end_cap.pcd")
-    parser.add_argument("--first_frame_id", default=20, type=int)
+    parser.add_argument("--first_frame_id", default=50, type=int)
     parser.add_argument("--max_iter", default=5, type=int)
     parser.add_argument("-v", "--visualize", default=True, action="store_true")
     args = parser.parse_args()
@@ -899,7 +900,7 @@ if __name__ == '__main__':
             estimation_cloud = robot_cloud + scene_pcd
             visualize(data_cfg, estimation_cloud, visualizer)
             visualizer.capture_screen_image(os.path.join(video_path, "raw_estimation", f"{idx:04d}.png"))
-            o3d.io.write_point_cloud(os.path.join(video_path, "scene_cloud", f"{idx:04d}.ply"), scene_pcd)
+            # o3d.io.write_point_cloud(os.path.join(video_path, "scene_cloud", f"{idx:04d}.ply"), scene_pcd)
             # o3d.io.write_point_cloud(os.path.join(video_path, "estimation_cloud", f"{idx:04d}.ply"), estimation_cloud)
 
             cv2.imshow("observation", color_im_bgr)
