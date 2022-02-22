@@ -290,7 +290,7 @@ class Tracker:
             rendered_seg, rendered_depth = self.render_nodes(mesh_nodes, depth_only=False)
             rendered_seg_gpu = torch.from_numpy(rendered_seg).cuda()
             rendered_depth_gpu = torch.from_numpy(rendered_depth).cuda()
-            print(f"rendering takes {time.time() - tic}s")
+            # print(f"rendering takes {time.time() - tic}s")
 
             # ================================== prediction step ==================================
             tic = time.time()
@@ -318,7 +318,7 @@ class Tracker:
                     self.G.edges[u, v]['pose_list'][-1] = rod_pose
                     self.G.nodes[u]['pos_list'][-1] = rod_pose[:3, 3] + rod_pose[:3, 2] * self.rod_length / 2
                     self.G.nodes[v]['pos_list'][-1] = rod_pose[:3, 3] - rod_pose[:3, 2] * self.rod_length / 2
-            print(f"ICP takes {time.time() - tic}s")
+            # print(f"ICP takes {time.time() - tic}s")
 
             # ================================== correction step ==================================
             # render final depth and segmentation image
@@ -330,9 +330,10 @@ class Tracker:
             # confidence_u, confidence_v = self.compute_confidence(obs_depth_im, rendered_depth, rendered_seg,
             #                                                      inlier_thresh=0.03)
 
+            # if (iter + 1) % 3 == 0:
             tic = time.time()
             self.constrained_optimization(info)
-            print(f"optimization takes {time.time() - tic}s")
+            # print(f"optimization takes {time.time() - tic}s")
         return
 
 
@@ -454,11 +455,11 @@ class Tracker:
 
                 u_confidence = self.G.nodes[u].get('confidence', 1)
                 v_confidence = self.G.nodes[v].get('confidence', 1)
-                factor = 0.5
-                if u_confidence > 0.5 and v_confidence > 0.5:
-                    factor = 0
-                if u_confidence < 0.2 or v_confidence <= 0.2:
-                    factor = 1
+                factor = 1
+                # if u_confidence > 0.5 and v_confidence > 0.5:
+                #     factor = 0
+                # if u_confidence < 0.2 or v_confidence <= 0.2:
+                #     factor = 1
 
                 u_pos = X[(3 * u):(3 * u + 3)]
                 v_pos = X[(3 * v):(3 * v + 3)]
@@ -505,17 +506,34 @@ class Tracker:
         curr_z_dir = curr_end_cap_centers[0] - curr_end_cap_centers[1]
         curr_z_dir /= la.norm(curr_z_dir)
 
+        init = False
         if prev_rod_pose is None:
+            init = True
             prev_rod_pose = np.eye(4)
 
-        prev_rot = prev_rod_pose[:3, :3].copy()
-        prev_z_dir = prev_rot[:, 2].copy()
+        prev_rot = prev_rod_pose[:3, :3]
+        prev_z_dir = np.copy(prev_rot[:, 2])
+        prev_pos = np.copy(prev_rod_pose[:3, 3])
 
         # https://math.stackexchange.com/questions/180418/
         delta_rot = perception_utils.np_rotmat_of_two_v(v1=prev_z_dir, v2=curr_z_dir)
         curr_rod_pose = np.eye(4)
         curr_rod_pose[:3, :3] = delta_rot @ prev_rot
         curr_rod_pose[:3, 3] = curr_rod_pos
+        curr_z_dir = np.copy(curr_rod_pose[:3, 2])
+        curr_pos = np.copy(curr_rod_pose[:3, 3])
+
+        rx_90 = np.array([
+            [1, 0, 0],
+            [0, -1, 0],
+            [0, 0, -1],
+        ])
+
+        if not init and curr_z_dir @ prev_z_dir < 0:
+            curr_rod_pose[:3, :3] = rx_90 @ curr_rod_pose[:3, :3]
+            curr_z_dir = curr_rod_pose[:3, 2]
+        if not init and (curr_z_dir @ prev_z_dir < 0.9 or la.norm(prev_pos - curr_pos) > 0.05):
+            curr_rod_pose = np.copy(prev_rod_pose)
         return curr_rod_pose
 
 
@@ -528,24 +546,29 @@ class Tracker:
         # ICP ref: https://www.youtube.com/watch?v=djnd502836w&t=781s
         Q = obs_pts[dist_mask].T  # (3, K)
         P = rendered_pts[closest_indices][dist_mask].T  # (3, K)
+        Q = Q.to(torch.float64)  # !!!
+        P = P.to(torch.float64)  # !!!
 
         P_mean = P.mean(1, keepdims=True)  # (3, 1)
         Q_mean = Q.mean(1, keepdims=True)  # (3, 1)
 
         H = (Q - Q_mean) @ (P - P_mean).T
-        U, D, V = torch.svd(H)
-        R = U @ V.T
+        U, D, V = torch.svd(H)  # H must ba float64 !!!
+        R = U @ V.T  # otherwise, R is not orthonormal (error > 1e-4)
         t = Q_mean - R @ P_mean
+        assert torch.allclose((R.T @ R).cpu(), torch.eye(3, dtype=torch.double))
 
         if verbose:
             error_before = torch.mean(torch.norm(Q - P, dim=0)).item()
             error_after = torch.mean(torch.norm(Q - (R @ P + t), dim=0)).item()
             print(f"{error_before = :.4f}, {error_after = :.4f}, delta = {error_before - error_after:.4f}")
 
-        delta_T = np.eye(4)
+        delta_T = np.eye(4, dtype=np.float64)
         delta_T[:3, :3] = R.cpu().numpy()
         delta_T[:3, 3:4] = t.cpu().numpy()
         return delta_T @ init_pose
+
+    # https://math.stackexchange.com/questions/1993953/closest-points-between-two-lines
 
 
 if __name__ == '__main__':
@@ -645,7 +668,8 @@ if __name__ == '__main__':
 
         tic = time.time()
         tracker.update(color_im, depth_im, info, args.max_iter)
-        print(f"update takes: {time.time() - tic}s")
+        # print(f"update takes: {time.time() - tic}s")
+        # os.makedirs(os.path.join(video_path, 'estimation_rod_only'), exist_ok=True)
 
         if args.visualize:
             rendered_seg, rendered_depth = tracker.render_current_state()
@@ -657,26 +681,28 @@ if __name__ == '__main__':
                 vis_im1[depth_im < mask] = Tracker.ColorDict[color]
                 vis_im2[mask > 0] = Tracker.ColorDict[color]
             vis_im = np.hstack([color_im, vis_im1, vis_im2])
-
-            cv2.imshow("estimation", cv2.cvtColor(vis_im, cv2.COLOR_RGB2BGR))
+            # vis_im = vis_im2
+            vis_im_bgr = cv2.cvtColor(vis_im, cv2.COLOR_RGB2BGR)
+            cv2.imshow("estimation", vis_im_bgr)
             key = cv2.waitKey(1)
             if key == ord('q'):
                 exit(0)
+            # cv2.imwrite(os.path.join(video_path, 'estimation_rod_only', f'{prefix}.png'), vis_im_bgr)
 
-            scene_pcd = perception_utils.create_pcd(depth_im, data_cfg['cam_intr'], color_im,
-                                                    depth_trunc=data_cfg['depth_trunc'])
+            # scene_pcd = perception_utils.create_pcd(depth_im, data_cfg['cam_intr'], color_im,
+            #                                         depth_trunc=data_cfg['depth_trunc'])
 
-            robot_cloud = o3d.geometry.PointCloud()
-            for color, (u, v) in data_cfg['color_to_rod'].items():
-                rod_pcd = copy.deepcopy(tracker.rod_pcd)
-                rod_pcd = rod_pcd.paint_uniform_color(np.array(Tracker.ColorDict[color]) / 255)
-                rod_pose = copy.deepcopy(tracker.G.edges[u, v]['pose_list'][-1])
-                rod_pcd.transform(rod_pose)
-                robot_cloud += rod_pcd
+            # robot_cloud = o3d.geometry.PointCloud()
+            # for color, (u, v) in data_cfg['color_to_rod'].items():
+            #     rod_pcd = copy.deepcopy(tracker.rod_pcd)
+            #     rod_pcd = rod_pcd.paint_uniform_color(np.array(Tracker.ColorDict[color]) / 255)
+            #     rod_pose = copy.deepcopy(tracker.G.edges[u, v]['pose_list'][-1])
+            #     rod_pcd.transform(rod_pose)
+            #     robot_cloud += rod_pcd
 
-            estimation_cloud = robot_cloud + scene_pcd
+            # estimation_cloud = robot_cloud + scene_pcd
             # o3d.io.write_point_cloud(os.path.join(video_path, "scene_cloud", f"{idx:04d}.ply"), scene_pcd)
-            o3d.io.write_point_cloud(os.path.join(video_path, "estimation_cloud", f"{idx:04d}.ply"), estimation_cloud)
+            # o3d.io.write_point_cloud(os.path.join(video_path, "estimation_cloud", f"{idx:04d}.ply"), estimation_cloud)
 
     # save rod poses and end cap positions to file
     pose_output_folder = os.path.join(video_path, "poses")

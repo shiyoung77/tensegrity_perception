@@ -167,8 +167,7 @@ def np_rotmat_of_two_v(v1, v2):
             vHat = np_axis_to_skewsym(v)
             vHatSq = np.dot(vHat, vHat)
             rotmat = np.eye(3) + s * vHat + (1 - c) * vHatSq
-    if not np.allclose(v2, rotmat.dot(v1)):
-        assert np.allclose(v2, rotmat.dot(v1))
+    assert np.allclose(v2, rotmat.dot(v1))
     return rotmat
 
 
