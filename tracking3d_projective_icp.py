@@ -404,7 +404,7 @@ class Tracker:
 
         sensor_measurement = info['sensors']
         sensor_status = info['sensor_status']
-        obj_func = self.objective_function_generator(sensor_measurement, sensor_status)
+        obj_func, jac_func = self.objective_function_generator(sensor_measurement, sensor_status)
 
         init_values = np.zeros(3 * num_end_caps)
         for i in range(num_end_caps):
@@ -420,7 +420,7 @@ class Tracker:
             constraint['fun'], constraint['jac'] = self.constraint_function_generator(u, v, rod_length)
             rod_constraints.append(constraint)
 
-        res = minimize(obj_func, init_values, method='SLSQP', constraints=rod_constraints)
+        res = minimize(obj_func, init_values, jac=jac_func, method='SLSQP', constraints=rod_constraints)
         assert res.success, "Optimization fail! Something must be wrong."
 
         for i in range(num_end_caps):
@@ -468,8 +468,39 @@ class Tracker:
                 binary_loss += factor * (estimated_length - measured_length)**2
 
             return unary_loss + binary_loss
+        
+        def jacobian_function(X):
+            result = np.zeros_like(X)
 
-        return objective_function
+            for i in range(len(self.data_cfg['node_to_color'])):
+                x_hat, y_hat, z_hat = self.G.nodes[i]['pos_list'][-1]
+                x, y, z = X[3*i : 3*i + 3]
+                confidence = self.G.nodes[i].get('confidence', 1)
+                result[3*i : 3*i + 3] = 2*confidence*np.array([x - x_hat, y - y_hat, z - z_hat])
+            
+            for sensor_id, (u, v) in self.data_cfg['sensor_to_tendon'].items():
+                sensor_id = str(sensor_id)
+                if not sensor_status[sensor_id] or sensor_measurement[sensor_id]['length'] <= 0:
+                    continue
+
+                u_confidence = self.G.nodes[u].get('confidence', 1)
+                v_confidence = self.G.nodes[v].get('confidence', 1)
+                factor = 1
+                # if u_confidence > 0.5 and v_confidence > 0.5:
+                #     factor = 0
+                # if u_confidence < 0.2 or v_confidence <= 0.2:
+                #     factor = 1
+
+                u_x, u_y, u_z = X[(3 * u):(3 * u + 3)]
+                v_x, v_y, v_z = X[(3 * v):(3 * v + 3)]
+                l_est = np.sqrt((u_x - v_x)**2 + (u_y - v_y)**2 + (u_z - v_z)**2)
+                l_gt = sensor_measurement[sensor_id]['length'] / 100
+                result[3*u : 3*u + 3] += 2*factor*(l_est - l_gt)*np.array([u_x - v_x, u_y - v_y, u_z - v_z]) / l_est
+                result[3*v : 3*v + 3] += 2*factor*(l_est - l_gt)*np.array([v_x - u_x, v_y - u_y, v_z - u_z]) / l_est
+            
+            return result
+
+        return objective_function, jacobian_function
 
 
     def constraint_function_generator(self, u, v, rod_length):
@@ -479,7 +510,7 @@ class Tracker:
             v_pos = X[3 * v: 3 * v + 3]
             return la.norm(u_pos - v_pos) - rod_length
         
-        def jacobian(X):
+        def jacobian_function(X):
             a = X[3 * u]
             b = X[3 * u + 1]
             c = X[3 * u + 2]
@@ -492,7 +523,7 @@ class Tracker:
             result[3 * v : 3 * v + 3] = (d - a) / C, (e - b) / C, (f - c) / C
             return result
         
-        return constraint_function, jacobian
+        return constraint_function, jacobian_function
 
 
     def rigid_finetune(self, complete_obs_depth):
@@ -526,15 +557,13 @@ class Tracker:
 
         prev_rot = prev_rod_pose[:3, :3]
         prev_z_dir = np.copy(prev_rot[:, 2])
-        prev_pos = np.copy(prev_rod_pose[:3, 3])
+        prev_rod_pos = np.copy(prev_rod_pose[:3, 3])
 
         # https://math.stackexchange.com/questions/180418/
         delta_rot = perception_utils.np_rotmat_of_two_v(v1=prev_z_dir, v2=curr_z_dir)
         curr_rod_pose = np.eye(4)
         curr_rod_pose[:3, :3] = delta_rot @ prev_rot
         curr_rod_pose[:3, 3] = curr_rod_pos
-        curr_z_dir = np.copy(curr_rod_pose[:3, 2])
-        curr_pos = np.copy(curr_rod_pose[:3, 3])
 
         rx_pi = np.array([
             [1, 0, 0],
@@ -546,10 +575,10 @@ class Tracker:
             curr_rod_pose[:3, :3] = rx_pi @ curr_rod_pose[:3, :3]
             curr_z_dir = curr_rod_pose[:3, 2]
 
-        prev_endcap_pos = prev_pos + self.data_cfg['rod_length'] / 2 * prev_z_dir
-        curr_endcap_pos = curr_pos + self.data_cfg['rod_length'] / 2 * curr_z_dir
+        prev_endcap_pos = prev_rod_pos + self.data_cfg['rod_length'] / 2 * prev_z_dir
+        curr_endcap_pos = curr_rod_pos + self.data_cfg['rod_length'] / 2 * curr_z_dir
         endcap_distance = la.norm(curr_endcap_pos - prev_endcap_pos)
-        if not init and (curr_z_dir @ prev_z_dir < 0.9 or endcap_distance > 0.04):
+        if not init and (curr_z_dir @ prev_z_dir < 0.9 or endcap_distance > 0.015):
             curr_rod_pose = np.copy(prev_rod_pose)
         return curr_rod_pose
 
