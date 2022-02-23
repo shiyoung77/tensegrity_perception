@@ -417,7 +417,7 @@ class Tracker:
         for _, (u, v) in self.data_cfg['color_to_rod'].items():
             constraint = dict()
             constraint['type'] = 'eq'
-            constraint['fun'] = self.constraint_function_generator(u, v, rod_length)
+            constraint['fun'], constraint['jac'] = self.constraint_function_generator(u, v, rod_length)
             rod_constraints.append(constraint)
 
         res = minimize(obj_func, init_values, method='SLSQP', constraints=rod_constraints)
@@ -478,8 +478,21 @@ class Tracker:
             u_pos = X[3 * u: 3 * u + 3]
             v_pos = X[3 * v: 3 * v + 3]
             return la.norm(u_pos - v_pos) - rod_length
-
-        return constraint_function
+        
+        def jacobian(X):
+            a = X[3 * u]
+            b = X[3 * u + 1]
+            c = X[3 * u + 2]
+            d = X[3 * v]
+            e = X[3 * v + 1]
+            f = X[3 * v + 2]
+            C = np.sqrt((a - d)**2 + (b - e)**2 + (c - f)**2)  # denominator
+            result = np.zeros_like(X)
+            result[3 * u : 3 * u + 3] = (a - d) / C, (b - e) / C, (c - f) / C
+            result[3 * v : 3 * v + 3] = (d - a) / C, (e - b) / C, (f - c) / C
+            return result
+        
+        return constraint_function, jacobian
 
 
     def rigid_finetune(self, complete_obs_depth):
@@ -523,16 +536,20 @@ class Tracker:
         curr_z_dir = np.copy(curr_rod_pose[:3, 2])
         curr_pos = np.copy(curr_rod_pose[:3, 3])
 
-        rx_90 = np.array([
+        rx_pi = np.array([
             [1, 0, 0],
             [0, -1, 0],
             [0, 0, -1],
         ])
 
         if not init and curr_z_dir @ prev_z_dir < 0:
-            curr_rod_pose[:3, :3] = rx_90 @ curr_rod_pose[:3, :3]
+            curr_rod_pose[:3, :3] = rx_pi @ curr_rod_pose[:3, :3]
             curr_z_dir = curr_rod_pose[:3, 2]
-        if not init and (curr_z_dir @ prev_z_dir < 0.9 or la.norm(prev_pos - curr_pos) > 0.05):
+
+        prev_endcap_pos = prev_pos + self.data_cfg['rod_length'] / 2 * prev_z_dir
+        curr_endcap_pos = curr_pos + self.data_cfg['rod_length'] / 2 * curr_z_dir
+        endcap_distance = la.norm(curr_endcap_pos - prev_endcap_pos)
+        if not init and (curr_z_dir @ prev_z_dir < 0.9 or endcap_distance > 0.04):
             curr_rod_pose = np.copy(prev_rod_pose)
         return curr_rod_pose
 
@@ -583,7 +600,7 @@ if __name__ == '__main__':
     parser.add_argument("--top_end_cap_mesh_file", default="pcd/yale/end_cap_top.obj")
     parser.add_argument("--bottom_end_cap_mesh_file", default="pcd/yale/end_cap_bottom.obj")
     parser.add_argument("--first_frame_id", default=50, type=int)
-    parser.add_argument("--max_iter", default=5, type=int)
+    parser.add_argument("--max_iter", default=3, type=int)
     parser.add_argument("-v", "--visualize", default=False, action="store_true")
     args = parser.parse_args()
 
