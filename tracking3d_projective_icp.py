@@ -478,29 +478,29 @@ class Tracker:
             constraint['fun'] = self.constraint_function_generator(u, v, rod_length)
             rod_constraints.append(constraint)
 
-        # rods min distance constraints
-        rods_color = list(self.data_cfg['color_to_rod'].keys())
-        n_rod = self.data_cfg['num_rods']
-        for i in range(n_rod):
-            u_i, v_i = self.data_cfg['color_to_rod'][rods_color[i]]
-            for j in range(i + 1, n_rod):
-                u_j, v_j = self.data_cfg['color_to_rod'][rods_color[j]]
-                constraint = dict()
-                constraint['type'] = 'ineq' # >=0
-                constraint['fun'] = self.rod_distance_constraint_generator(u_i, u_j, v_i, v_j)
-                rod_constraints.append(constraint)
-
-        # rods relative direction constraints
-        for i in range(n_rod):
-            u_i, v_i = self.data_cfg['color_to_rod'][rods_color[i]]
-            for j in range(i + 1, n_rod):
-                u_j, v_j = self.data_cfg['color_to_rod'][rods_color[j]]
-                pos1, pos2 = self.get_perpendicular_vector(i, j, -1)
-                pre_direction = pos2 - pos1
-                constraint = dict()
-                constraint['type'] = 'ineq' # >=0
-                constraint['fun'] = self.rod_relation_constraint_generator(u_i, u_j, v_i, v_j, pre_direction)
-                rod_constraints.append(constraint)
+        # # rods min distance constraints
+        # rods_color = list(self.data_cfg['color_to_rod'].keys())
+        # n_rod = self.data_cfg['num_rods']
+        # for i in range(n_rod):
+        #     u_i, v_i = self.data_cfg['color_to_rod'][rods_color[i]]
+        #     for j in range(i + 1, n_rod):
+        #         u_j, v_j = self.data_cfg['color_to_rod'][rods_color[j]]
+        #         constraint = dict()
+        #         constraint['type'] = 'ineq' # >=0
+        #         constraint['fun'] = self.rod_distance_constraint_generator(u_i, u_j, v_i, v_j)
+        #         rod_constraints.append(constraint)
+        #
+        # # rods relative direction constraints
+        # for i in range(n_rod):
+        #     u_i, v_i = self.data_cfg['color_to_rod'][rods_color[i]]
+        #     for j in range(i + 1, n_rod):
+        #         u_j, v_j = self.data_cfg['color_to_rod'][rods_color[j]]
+        #         pos1, pos2 = self.get_perpendicular_vector(i, j, -1)
+        #         pre_direction = pos2 - pos1
+        #         constraint = dict()
+        #         constraint['type'] = 'ineq' # >=0
+        #         constraint['fun'] = self.rod_relation_constraint_generator(u_i, u_j, v_i, v_j, pre_direction)
+        #         rod_constraints.append(constraint)
 
         res = minimize(obj_func, init_values, method='SLSQP', constraints=rod_constraints)
         assert res.success, "Optimization fail! Something must be wrong."
@@ -546,7 +546,7 @@ class Tracker:
         vec_j = vec_j / np.linalg.norm(vec_j)
         # not parallel
         if np.isclose(abs(np.dot(vec_i, vec_j)), 1, atol=1e-3):
-            return None, None
+            return None, None, None
         perpend_vec = np.cross(vec_i, vec_j)
         perpend_vec = perpend_vec / np.linalg.norm(perpend_vec)
 
@@ -562,7 +562,7 @@ class Tracker:
         pos2 = pos_u_j + t2 * vec_j
         assert np.isclose(np.linalg.norm(pos2 - pos1), abs(t3))
         # return the two end point of the perpendicular vector
-        return pos1, pos2
+        return t1, t2, t3 * perpend_vec
 
     def objective_function_generator(self, sensor_measurement, sensor_status):
 
@@ -609,30 +609,36 @@ class Tracker:
             grounding_loss = 0
 
             # rod relation loss
-            # relation_loss = 0
-            # rods_color = list(self.data_cfg['color_to_rod'].keys())
-            # n_rod = len(rods_color)
-            # for i in range(n_rod):
-            #     for j in range(i+1, n_rod):
-            #         pre_pos1, pre_pos2 = self.get_perpendicular_vector(i, j, t=-1)
-            #         cur_pos1, cur_pos2 = self.get_perpendicular_vector(i, j, X=X)
-            #         if pre_pos1 is None or cur_pos1 is None:
-            #             continue
-            #
-            #         pre_length = np.linalg.norm(pre_pos2 - pre_pos1)
-            #         cur_length = np.linalg.norm(cur_pos2 - cur_pos1)
-            #         # if pre_length > self.data_cfg['rod_length'] or cur_length > self.data_cfg['rod_length']:
-            #         #     continue
-            #
-            #         rod_r = 0.0051 # rod radius
-            #         if cur_length < rod_r*2:
-            #             relation_loss += 10
-            #
-            #         pre_direction = pre_pos2 - pre_pos1
-            #         cur_direction = cur_pos2 - cur_pos1
-            #         if np.dot(pre_direction, cur_direction) <= 0: #
-            #             relation_loss += 10
             relation_loss = 0
+            rods_color = list(self.data_cfg['color_to_rod'].keys())
+            n_rod = len(rods_color)
+            for i in range(n_rod):
+                for j in range(i+1, n_rod):
+                    pre_t1, pre_t2, pre_perpend_v = self.get_perpendicular_vector(i, j, t=-1)
+                    t1, t2, perpend_v = self.get_perpendicular_vector(i, j, X=X)
+                    if perpend_v is None:
+                        continue
+                    cur_length = np.linalg.norm(perpend_v)
+                    rod_r = 0.0051 # rod radius
+                    factor = 10
+                    if cur_length < rod_r*2:
+                        relation_loss += factor * (cur_length - rod_r*2)**2
+                        # print("add rod rod min distance loss")
+
+                    if pre_t1 is None or t1 is None:
+                        continue
+
+                    if t1 < 0 or t2 < 0 or pre_t1 < 0 or pre_t2 < 0:
+                        continue
+
+                    if max(t1, t2, pre_t1, pre_t2) > self.data_cfg['rod_length']:
+                        continue
+
+                    if np.dot(pre_perpend_v, perpend_v) <= 0: #
+                        factor = 10
+                        relation_loss += factor * np.dot(pre_perpend_v, perpend_v)**2
+                        print("add rod rod relation loss")
+            # relation_loss = 0
             return unary_loss + binary_loss + grounding_loss * 10 + relation_loss
 
         return objective_function
