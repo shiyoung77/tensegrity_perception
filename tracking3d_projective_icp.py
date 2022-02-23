@@ -62,7 +62,19 @@ def get_perpendicular_vector(u_i, v_i, u_j, v_j, X=None):
     pos2 = pos_u_j + t2 * vec_j
     assert np.isclose(np.linalg.norm(pos2 - pos1), abs(t3))
     # return the two end point of the perpendicular vector
-    return t1, t2, t3*perpend_vec
+    return t1, t2, t3 * perpend_vec
+
+
+def get_middle_direction_vector(u_i, v_i, u_j, v_j, X=None):
+    pos_u_i = X[(3 * u_i):(3 * u_i + 3)]
+    pos_v_i = X[(3 * v_i):(3 * v_i + 3)]
+    vec_i = pos_v_i - pos_u_i
+
+    pos_u_j = X[(3 * u_j):(3 * u_j + 3)]
+    pos_v_j = X[(3 * v_j):(3 * v_j + 3)]
+    vec_j = pos_v_j - pos_u_j
+    return np.linalg.norm(vec_i) / 2., np.linalg.norm(vec_j) / 2., (pos_u_j + vec_j / 2.) - (pos_u_i + vec_i / 2.)
+
 
 class Tracker:
     ColorDict = {
@@ -299,8 +311,8 @@ class Tracker:
                 obs_depth_im = np.zeros_like(depth_im)
 
                 hsv_mask = cv2.inRange(color_im_hsv,
-                                    lowerb=tuple(self.data_cfg['hsv_ranges'][color][0]),
-                                    upperb=tuple(self.data_cfg['hsv_ranges'][color][1])).astype(np.bool8)
+                                       lowerb=tuple(self.data_cfg['hsv_ranges'][color][0]),
+                                       upperb=tuple(self.data_cfg['hsv_ranges'][color][1])).astype(np.bool8)
                 if color == 'red':
                     hsv_mask |= cv2.inRange(color_im_hsv, lowerb=(0, 80, 50), upperb=(15, 255, 255)).astype(np.bool8)
 
@@ -314,7 +326,8 @@ class Tracker:
                     x_min, x_max = center_x - 40, center_x + 40
                     y_min, y_max = center_y - 40, center_y + 40
                     cv2.rectangle(vis, (x_min, y_min), (x_max, y_max), color=(255, 0, 0))
-                    cv2.putText(vis, str(node), (x_min, y_min), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 255), 2, cv2.LINE_AA)
+                    cv2.putText(vis, str(node), (x_min, y_min), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 255), 2,
+                                cv2.LINE_AA)
 
                     ys, xs = np.nonzero(hsv_mask[y_min:y_max, x_min:x_max])
                     num_obs_pixels = ys.shape[0]
@@ -330,16 +343,16 @@ class Tracker:
 
                 # ICP
                 mesh_nodes = [pyrender.Node(name='mesh', mesh=self.end_cap_meshes[0], matrix=np.eye(4)),
-                            pyrender.Node(name='mesh', mesh=self.end_cap_meshes[1], matrix=np.eye(4))]
+                              pyrender.Node(name='mesh', mesh=self.end_cap_meshes[1], matrix=np.eye(4))]
                 prev_pose_cam = self.data_cfg['cam_extr'] @ prev_pose
                 init_poses = [prev_pose_cam, prev_pose_cam]
                 # tic = time.time()
                 rod_pose, rendered_depth, rendered_seg = self.projective_icp_cuda(
-                    aug_obs_depth_im, mesh_nodes, init_poses, max_iter=10, max_distance=0.01, early_stop_thresh=0.001)
+                    aug_obs_depth_im, mesh_nodes, init_poses, max_iter=10, max_distance=0.1, early_stop_thresh=0.001)
                 # print(f"icp takes {time.time() - tic}s")
                 rod_pose = la.inv(self.data_cfg['cam_extr']) @ rod_pose[0]
                 confidence_u, confidence_v = self.compute_confidence(obs_depth_im, rendered_depth, rendered_seg,
-                                                                    inlier_thresh=0.03)
+                                                                     inlier_thresh=0.03)
 
                 if iter == 0:
                     self.G.edges[u, v]['pose_list'].append(rod_pose)
@@ -387,7 +400,7 @@ class Tracker:
             if pos is None:
                 continue
             mask_ids.append(i)
-            cap_end_pos_in_mc_f.append([pos['x']/1000., pos['y']/1000., pos['z']/1000.])
+            cap_end_pos_in_mc_f.append([pos['x'] / 1000., pos['y'] / 1000., pos['z'] / 1000.])
         cap_end_pos_in_mc_f = np.array(cap_end_pos_in_mc_f).T  # 3x6
         cap_end_pos_in_cam_f = cap_end_pos_in_cam_f[:, mask_ids]
 
@@ -458,24 +471,35 @@ class Tracker:
         # return max(0.1, conf_u), max(0.1, conf_v)
         return conf_u, conf_v
 
-    def rod_relation_constraint_generator(self, u_i, v_i, u_j, v_j, pre_direction):
+    def rod_relation_constraint_generator(self, u_i, v_i, u_j, v_j, pre_direction, t1, t2):
         rod_length = 0.3
+
         def function(X):
-            t1, t2, perpend_vec = get_perpendicular_vector(u_i, v_i, u_j, v_j, X=X)
-            if t1 < 0 or t2 < 0 or t1 >= rod_length or t2 >= rod_length:
-                return 0
+            pos_u_i = X[(3 * u_i):(3 * u_i + 3)]
+            pos_v_i = X[(3 * v_i):(3 * v_i + 3)]
+            vec_i = pos_v_i - pos_u_i
+            vec_i = vec_i / np.linalg.norm(vec_i)
+
+            pos_u_j = X[(3 * u_j):(3 * u_j + 3)]
+            pos_v_j = X[(3 * v_j):(3 * v_j + 3)]
+            vec_j = pos_v_j - pos_u_j
+            vec_j = vec_j / np.linalg.norm(vec_j)
+            perpend_vec = (pos_u_j + t2 * vec_j) - (pos_u_i + t1 * vec_i)
             cur_direction = perpend_vec
             return np.dot(cur_direction, pre_direction)
+
         return function
 
     def rod_distance_constraint_generator(self, u_i, v_i, u_j, v_j):
         rod_length = 0.3
+
         def function(X):
             t1, t2, perpend_vec = get_perpendicular_vector(u_i, v_i, u_j, v_j, X=X)
             if t1 < 0 or t2 < 0 or t1 >= rod_length or t2 >= rod_length:
                 return 0
             dist = np.linalg.norm(perpend_vec)
-            return dist - 0.005*2
+            return dist - 0.005 * 2
+
         return function
 
     def constrained_optimization(self, info):
@@ -500,32 +524,34 @@ class Tracker:
             constraint['fun'] = self.constraint_function_generator(u, v, rod_length)
             rod_constraints.append(constraint)
 
-        # # rods min distance constraints
-        # rods_color = list(self.data_cfg['color_to_rod'].keys())
-        # n_rod = self.data_cfg['num_rods']
+        # rods min distance constraints
+        rods_color = list(self.data_cfg['color_to_rod'].keys())
+        n_rod = self.data_cfg['num_rods']
         # for i in range(n_rod):
         #     u_i, v_i = self.data_cfg['color_to_rod'][rods_color[i]]
         #     for j in range(i + 1, n_rod):
         #         u_j, v_j = self.data_cfg['color_to_rod'][rods_color[j]]
         #         constraint = dict()
-        #         constraint['type'] = 'ineq' # >=0
+        #         constraint['type'] = 'ineq'  # >=0
         #         constraint['fun'] = self.rod_distance_constraint_generator(u_i, u_j, v_i, v_j)
         #         rod_constraints.append(constraint)
-        #
-        # # rods relative direction constraints
-        # for i in range(n_rod):
-        #     u_i, v_i = self.data_cfg['color_to_rod'][rods_color[i]]
-        #     for j in range(i + 1, n_rod):
-        #         u_j, v_j = self.data_cfg['color_to_rod'][rods_color[j]]
-        #         t1, t2, pre_perpend_vec = self.get_perpendicular_vector(i, j, -1)
-        #         if t1 is None:
-        #             continue
-        #         if t1 < 0 or t2 < 0 or t1 >= self.data_cfg['rod_length'] or t2 >= self.data_cfg['rod_length']:
-        #             continue
-        #         constraint = dict()
-        #         constraint['type'] = 'ineq' # >=0
-        #         constraint['fun'] = self.rod_relation_constraint_generator(u_i, u_j, v_i, v_j, pre_perpend_vec)
-        #         rod_constraints.append(constraint)
+
+        # rods relative direction constraints
+        for i in range(n_rod):
+            u_i, v_i = self.data_cfg['color_to_rod'][rods_color[i]]
+            for j in range(i + 1, n_rod):
+                u_j, v_j = self.data_cfg['color_to_rod'][rods_color[j]]
+                t1, t2, pre_perpend_vec = self.get_middle_direction_vector(i, j, -1)
+                if not np.isclose(t1, self.data_cfg['rod_length']/2., atol=1e-2):
+                    print("t1 is ", t1)
+                    assert np.isclose(t1, self.data_cfg['rod_length']/2., atol=1e-2)
+                if not np.isclose(t2, self.data_cfg['rod_length']/2., atol=1e-2):
+                    print("t2 is ", t2)
+                    assert np.isclose(t2, self.data_cfg['rod_length']/2., atol=1e-2)
+                constraint = dict()
+                constraint['type'] = 'ineq'  # >=0
+                constraint['fun'] = self.rod_relation_constraint_generator(u_i, u_j, v_i, v_j, pre_perpend_vec, t1, t2)
+                rod_constraints.append(constraint)
 
         res = minimize(obj_func, init_values, method='SLSQP', constraints=rod_constraints)
         assert res.success, "Optimization fail! Something must be wrong."
@@ -598,6 +624,32 @@ class Tracker:
         # return the two end point of the perpendicular vector
         return t1, t2, t3 * perpend_vec
 
+    def get_middle_direction_vector(self, i, j, t=None, X=None):
+        rods_color = list(self.data_cfg['color_to_rod'].keys())
+        u_i, v_i = self.data_cfg['color_to_rod'][rods_color[i]]
+        if t is not None:
+            pos_u_i = self.G.nodes[u_i]['pos_list'][t]
+            pos_v_i = self.G.nodes[v_i]['pos_list'][t]
+        elif X is not None:
+            pos_u_i = X[(3 * u_i):(3 * u_i + 3)]
+            pos_v_i = X[(3 * v_i):(3 * v_i + 3)]
+        else:
+            raise ValueError
+        vec_i = pos_v_i - pos_u_i
+
+        u_j, v_j = self.data_cfg['color_to_rod'][rods_color[j]]
+        if t is not None:
+            pos_u_j = self.G.nodes[u_j]['pos_list'][t]
+            pos_v_j = self.G.nodes[v_j]['pos_list'][t]
+        elif X is not None:
+            pos_u_j = X[(3 * u_j):(3 * u_j + 3)]
+            pos_v_j = X[(3 * v_j):(3 * v_j + 3)]
+        else:
+            raise ValueError
+        vec_j = pos_v_j - pos_u_j
+
+        return np.linalg.norm(vec_i / 2.), np.linalg.norm(vec_j / 2.), (pos_u_j + vec_j / 2.) - (pos_u_i + vec_i / 2.)
+
     def objective_function_generator(self, sensor_measurement, sensor_status):
 
         def objective_function(X):
@@ -608,7 +660,7 @@ class Tracker:
                 if i in nodes_on_ground:
                     estimated_pos[2] = 0.015
                 confidence = self.G.nodes[i].get('confidence', 1)
-                unary_loss += confidence * np.sum((pos - estimated_pos)**2)
+                unary_loss += confidence * np.sum((pos - estimated_pos) ** 2)
 
             # unary_loss *= 0.1
 
@@ -630,7 +682,7 @@ class Tracker:
                 v_pos = X[(3 * v):(3 * v + 3)]
                 estimated_length = la.norm(u_pos - v_pos)
                 measured_length = sensor_measurement[sensor_id]['length'] / 100
-                binary_loss += factor * (estimated_length - measured_length)**2
+                binary_loss += factor * (estimated_length - measured_length) ** 2
 
             # binary_loss *= 0.1
 
@@ -689,6 +741,7 @@ class Tracker:
     def physical_constraint_generator(self):
         def constraint_function(X):
             pass
+
         return constraint_function
 
     def rigid_finetune(self, complete_obs_depth):
