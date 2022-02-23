@@ -335,7 +335,7 @@ class Tracker:
                 init_poses = [prev_pose_cam, prev_pose_cam]
                 # tic = time.time()
                 rod_pose, rendered_depth, rendered_seg = self.projective_icp_cuda(
-                    aug_obs_depth_im, mesh_nodes, init_poses, max_iter=10, max_distance=0.05, early_stop_thresh=0.001)
+                    aug_obs_depth_im, mesh_nodes, init_poses, max_iter=10, max_distance=0.01, early_stop_thresh=0.001)
                 # print(f"icp takes {time.time() - tic}s")
                 rod_pose = la.inv(self.data_cfg['cam_extr']) @ rod_pose[0]
                 confidence_u, confidence_v = self.compute_confidence(obs_depth_im, rendered_depth, rendered_seg,
@@ -446,7 +446,17 @@ class Tracker:
         matched_labels = pts_labels[dist_mask]
         matched_u = torch.sum(matched_labels == 1).cpu().item()
         matched_v = torch.sum(matched_labels == 2).cpu().item()
-        return max(0.1, matched_u / rendered_u), max(0.1, matched_v / rendered_v)
+        if rendered_u == 0:
+            conf_u = 0.
+        else:
+            conf_u = matched_u / rendered_u
+
+        if rendered_v == 0:
+            conf_v = 0.
+        else:
+            conf_v = matched_v / rendered_v
+        # return max(0.1, conf_u), max(0.1, conf_v)
+        return conf_u, conf_v
 
     def rod_relation_constraint_generator(self, u_i, v_i, u_j, v_j, pre_direction):
         rod_length = 0.3
@@ -490,32 +500,32 @@ class Tracker:
             constraint['fun'] = self.constraint_function_generator(u, v, rod_length)
             rod_constraints.append(constraint)
 
-        # rods min distance constraints
-        rods_color = list(self.data_cfg['color_to_rod'].keys())
-        n_rod = self.data_cfg['num_rods']
-        for i in range(n_rod):
-            u_i, v_i = self.data_cfg['color_to_rod'][rods_color[i]]
-            for j in range(i + 1, n_rod):
-                u_j, v_j = self.data_cfg['color_to_rod'][rods_color[j]]
-                constraint = dict()
-                constraint['type'] = 'ineq' # >=0
-                constraint['fun'] = self.rod_distance_constraint_generator(u_i, u_j, v_i, v_j)
-                rod_constraints.append(constraint)
-
-        # rods relative direction constraints
-        for i in range(n_rod):
-            u_i, v_i = self.data_cfg['color_to_rod'][rods_color[i]]
-            for j in range(i + 1, n_rod):
-                u_j, v_j = self.data_cfg['color_to_rod'][rods_color[j]]
-                t1, t2, pre_perpend_vec = self.get_perpendicular_vector(i, j, -1)
-                if t1 is None:
-                    continue
-                if t1 < 0 or t2 < 0 or t1 >= self.data_cfg['rod_length'] or t2 >= self.data_cfg['rod_length']:
-                    continue
-                constraint = dict()
-                constraint['type'] = 'ineq' # >=0
-                constraint['fun'] = self.rod_relation_constraint_generator(u_i, u_j, v_i, v_j, pre_perpend_vec)
-                rod_constraints.append(constraint)
+        # # rods min distance constraints
+        # rods_color = list(self.data_cfg['color_to_rod'].keys())
+        # n_rod = self.data_cfg['num_rods']
+        # for i in range(n_rod):
+        #     u_i, v_i = self.data_cfg['color_to_rod'][rods_color[i]]
+        #     for j in range(i + 1, n_rod):
+        #         u_j, v_j = self.data_cfg['color_to_rod'][rods_color[j]]
+        #         constraint = dict()
+        #         constraint['type'] = 'ineq' # >=0
+        #         constraint['fun'] = self.rod_distance_constraint_generator(u_i, u_j, v_i, v_j)
+        #         rod_constraints.append(constraint)
+        #
+        # # rods relative direction constraints
+        # for i in range(n_rod):
+        #     u_i, v_i = self.data_cfg['color_to_rod'][rods_color[i]]
+        #     for j in range(i + 1, n_rod):
+        #         u_j, v_j = self.data_cfg['color_to_rod'][rods_color[j]]
+        #         t1, t2, pre_perpend_vec = self.get_perpendicular_vector(i, j, -1)
+        #         if t1 is None:
+        #             continue
+        #         if t1 < 0 or t2 < 0 or t1 >= self.data_cfg['rod_length'] or t2 >= self.data_cfg['rod_length']:
+        #             continue
+        #         constraint = dict()
+        #         constraint['type'] = 'ineq' # >=0
+        #         constraint['fun'] = self.rod_relation_constraint_generator(u_i, u_j, v_i, v_j, pre_perpend_vec)
+        #         rod_constraints.append(constraint)
 
         res = minimize(obj_func, init_values, method='SLSQP', constraints=rod_constraints)
         assert res.success, "Optimization fail! Something must be wrong."
@@ -633,35 +643,35 @@ class Tracker:
             grounding_loss = 0
 
             # rod relation loss
-            relation_loss = 0
-            rods_color = list(self.data_cfg['color_to_rod'].keys())
-            n_rod = len(rods_color)
-            for i in range(n_rod):
-                for j in range(i+1, n_rod):
-                    pre_t1, pre_t2, pre_perpend_v = self.get_perpendicular_vector(i, j, t=-1)
-                    t1, t2, perpend_v = self.get_perpendicular_vector(i, j, X=X)
-                    if perpend_v is None:
-                        continue
-                    cur_length = np.linalg.norm(perpend_v)
-                    rod_r = 0.0051 # rod radius
-                    factor = 10
-                    if cur_length < rod_r*2:
-                        relation_loss += factor * (cur_length - rod_r*2)**2
-                        # print("add rod rod min distance loss")
-
-                    if pre_t1 is None or t1 is None:
-                        continue
-
-                    if t1 < 0 or t2 < 0 or pre_t1 < 0 or pre_t2 < 0:
-                        continue
-
-                    if max(t1, t2, pre_t1, pre_t2) > self.data_cfg['rod_length']:
-                        continue
-
-                    if np.dot(pre_perpend_v, perpend_v) <= 0: #
-                        factor = 10
-                        relation_loss += factor * np.dot(pre_perpend_v, perpend_v)**2
-                        print("add rod rod relation loss")
+            # relation_loss = 0
+            # rods_color = list(self.data_cfg['color_to_rod'].keys())
+            # n_rod = len(rods_color)
+            # for i in range(n_rod):
+            #     for j in range(i+1, n_rod):
+            #         pre_t1, pre_t2, pre_perpend_v = self.get_perpendicular_vector(i, j, t=-1)
+            #         t1, t2, perpend_v = self.get_perpendicular_vector(i, j, X=X)
+            #         if perpend_v is None:
+            #             continue
+            #         cur_length = np.linalg.norm(perpend_v)
+            #         rod_r = 0.0051 # rod radius
+            #         factor = 10
+            #         if cur_length < rod_r*2:
+            #             relation_loss += factor * (cur_length - rod_r*2)**2
+            #             # print("add rod rod min distance loss")
+            #
+            #         if pre_t1 is None or t1 is None:
+            #             continue
+            #
+            #         if t1 < 0 or t2 < 0 or pre_t1 < 0 or pre_t2 < 0:
+            #             continue
+            #
+            #         if max(t1, t2, pre_t1, pre_t2) > self.data_cfg['rod_length']:
+            #             continue
+            #
+            #         if np.dot(pre_perpend_v, perpend_v) <= 0: #
+            #             factor = 10
+            #             relation_loss += factor * np.dot(pre_perpend_v, perpend_v)**2
+            #             print("add rod rod relation loss")
             relation_loss = 0
             return unary_loss + binary_loss + grounding_loss * 10 + relation_loss
 
