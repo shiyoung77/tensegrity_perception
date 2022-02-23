@@ -39,7 +39,13 @@ def get_perpendicular_vector(u_i, v_i, u_j, v_j, X=None):
     if np.isclose(abs(np.dot(vec_i, vec_j)), 1):
         perp_vec = pos_u_j - pos_u_i
         perp_vec = perp_vec - np.dot(perp_vec, vec_i) * vec_i
-        return pos_u_i, pos_u_i + perp_vec
+        t1 = 0
+        t2 = np.dot(pos_u_i + perp_vec - pos_u_j, vec_j)
+        if t2 >= 0:
+            return t1, t2, perp_vec
+        t1 = -t2
+        t2 = 0
+        return t1, t2, perp_vec
 
     perpend_vec = np.cross(vec_i, vec_j)
     perpend_vec = perpend_vec / np.linalg.norm(perpend_vec)
@@ -56,7 +62,7 @@ def get_perpendicular_vector(u_i, v_i, u_j, v_j, X=None):
     pos2 = pos_u_j + t2 * vec_j
     assert np.isclose(np.linalg.norm(pos2 - pos1), abs(t3))
     # return the two end point of the perpendicular vector
-    return pos1, pos2
+    return t1, t2, t3*perpend_vec
 
 class Tracker:
     ColorDict = {
@@ -443,16 +449,22 @@ class Tracker:
         return max(0.1, matched_u / rendered_u), max(0.1, matched_v / rendered_v)
 
     def rod_relation_constraint_generator(self, u_i, v_i, u_j, v_j, pre_direction):
+        rod_length = 0.3
         def function(X):
-            pos1, pos2 = get_perpendicular_vector(u_i, v_i, u_j, v_j, X=X)
-            cur_direction = pos2 - pos1
+            t1, t2, perpend_vec = get_perpendicular_vector(u_i, v_i, u_j, v_j, X=X)
+            if t1 < 0 or t2 < 0 or t1 >= rod_length or t2 >= rod_length:
+                return 0
+            cur_direction = perpend_vec
             return np.dot(cur_direction, pre_direction)
         return function
 
     def rod_distance_constraint_generator(self, u_i, v_i, u_j, v_j):
+        rod_length = 0.3
         def function(X):
-            pos1, pos2 = get_perpendicular_vector(u_i, v_i, u_j, v_j, X=X)
-            dist = np.linalg.norm(pos2-pos1)
+            t1, t2, perpend_vec = get_perpendicular_vector(u_i, v_i, u_j, v_j, X=X)
+            if t1 < 0 or t2 < 0 or t1 >= rod_length or t2 >= rod_length:
+                return 0
+            dist = np.linalg.norm(perpend_vec)
             return dist - 0.005*2
         return function
 
@@ -478,29 +490,32 @@ class Tracker:
             constraint['fun'] = self.constraint_function_generator(u, v, rod_length)
             rod_constraints.append(constraint)
 
-        # # rods min distance constraints
-        # rods_color = list(self.data_cfg['color_to_rod'].keys())
-        # n_rod = self.data_cfg['num_rods']
-        # for i in range(n_rod):
-        #     u_i, v_i = self.data_cfg['color_to_rod'][rods_color[i]]
-        #     for j in range(i + 1, n_rod):
-        #         u_j, v_j = self.data_cfg['color_to_rod'][rods_color[j]]
-        #         constraint = dict()
-        #         constraint['type'] = 'ineq' # >=0
-        #         constraint['fun'] = self.rod_distance_constraint_generator(u_i, u_j, v_i, v_j)
-        #         rod_constraints.append(constraint)
-        #
-        # # rods relative direction constraints
-        # for i in range(n_rod):
-        #     u_i, v_i = self.data_cfg['color_to_rod'][rods_color[i]]
-        #     for j in range(i + 1, n_rod):
-        #         u_j, v_j = self.data_cfg['color_to_rod'][rods_color[j]]
-        #         pos1, pos2 = self.get_perpendicular_vector(i, j, -1)
-        #         pre_direction = pos2 - pos1
-        #         constraint = dict()
-        #         constraint['type'] = 'ineq' # >=0
-        #         constraint['fun'] = self.rod_relation_constraint_generator(u_i, u_j, v_i, v_j, pre_direction)
-        #         rod_constraints.append(constraint)
+        # rods min distance constraints
+        rods_color = list(self.data_cfg['color_to_rod'].keys())
+        n_rod = self.data_cfg['num_rods']
+        for i in range(n_rod):
+            u_i, v_i = self.data_cfg['color_to_rod'][rods_color[i]]
+            for j in range(i + 1, n_rod):
+                u_j, v_j = self.data_cfg['color_to_rod'][rods_color[j]]
+                constraint = dict()
+                constraint['type'] = 'ineq' # >=0
+                constraint['fun'] = self.rod_distance_constraint_generator(u_i, u_j, v_i, v_j)
+                rod_constraints.append(constraint)
+
+        # rods relative direction constraints
+        for i in range(n_rod):
+            u_i, v_i = self.data_cfg['color_to_rod'][rods_color[i]]
+            for j in range(i + 1, n_rod):
+                u_j, v_j = self.data_cfg['color_to_rod'][rods_color[j]]
+                t1, t2, pre_perpend_vec = self.get_perpendicular_vector(i, j, -1)
+                if t1 is None:
+                    continue
+                if t1 < 0 or t2 < 0 or t1 >= self.data_cfg['rod_length'] or t2 >= self.data_cfg['rod_length']:
+                    continue
+                constraint = dict()
+                constraint['type'] = 'ineq' # >=0
+                constraint['fun'] = self.rod_relation_constraint_generator(u_i, u_j, v_i, v_j, pre_perpend_vec)
+                rod_constraints.append(constraint)
 
         res = minimize(obj_func, init_values, method='SLSQP', constraints=rod_constraints)
         assert res.success, "Optimization fail! Something must be wrong."
@@ -546,7 +561,16 @@ class Tracker:
         vec_j = vec_j / np.linalg.norm(vec_j)
         # not parallel
         if np.isclose(abs(np.dot(vec_i, vec_j)), 1, atol=1e-3):
-            return None, None, None
+            perp_vec = pos_u_j - pos_u_i
+            perp_vec = perp_vec - np.dot(perp_vec, vec_i) * vec_i
+            t1 = 0
+            t2 = np.dot(pos_u_i + perp_vec - pos_u_j, vec_j)
+            if t2 >= 0:
+                return t1, t2, perp_vec
+            t1 = -t2
+            t2 = 0
+            return t1, t2, perp_vec
+
         perpend_vec = np.cross(vec_i, vec_j)
         perpend_vec = perpend_vec / np.linalg.norm(perpend_vec)
 
@@ -638,7 +662,7 @@ class Tracker:
                         factor = 10
                         relation_loss += factor * np.dot(pre_perpend_v, perpend_v)**2
                         print("add rod rod relation loss")
-            # relation_loss = 0
+            relation_loss = 0
             return unary_loss + binary_loss + grounding_loss * 10 + relation_loss
 
         return objective_function
