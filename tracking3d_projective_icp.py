@@ -511,16 +511,12 @@ class Tracker:
             return la.norm(u_pos - v_pos) - rod_length
         
         def jacobian_function(X):
-            a = X[3 * u]
-            b = X[3 * u + 1]
-            c = X[3 * u + 2]
-            d = X[3 * v]
-            e = X[3 * v + 1]
-            f = X[3 * v + 2]
-            C = np.sqrt((a - d)**2 + (b - e)**2 + (c - f)**2)  # denominator
+            u_x, u_y, u_z = X[3 * u : 3 * u + 3]
+            v_x, v_y, v_z = X[3 * v : 3 * v + 3]
+            C = np.sqrt((u_x - v_x)**2 + (u_y - v_y)**2 + (u_z - v_z)**2)  # denominator
             result = np.zeros_like(X)
-            result[3 * u : 3 * u + 3] = (a - d) / C, (b - e) / C, (c - f) / C
-            result[3 * v : 3 * v + 3] = (d - a) / C, (e - b) / C, (f - c) / C
+            result[3 * u : 3 * u + 3] = np.array([u_x - v_x, u_y - v_y, u_z - v_z]) / C
+            result[3 * v : 3 * v + 3] = np.array([v_x - u_x, v_y - u_y, v_z - u_z]) / C
             return result
         
         return constraint_function, jacobian_function
