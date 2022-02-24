@@ -831,7 +831,7 @@ if __name__ == '__main__':
         tic = time.time()
         tracker.update(color_im, depth_im, info, args.max_iter)
         # print(f"update takes: {time.time() - tic}s")
-        os.makedirs(os.path.join(video_path, 'estimation_rod_only'), exist_ok=True)
+        # os.makedirs(os.path.join(video_path, 'estimation_rod_only'), exist_ok=True)
 
         if args.visualize:
             rendered_seg, rendered_depth = tracker.render_current_state()
@@ -849,22 +849,22 @@ if __name__ == '__main__':
             key = cv2.waitKey(1)
             if key == ord('q'):
                 exit(0)
-            cv2.imwrite(os.path.join(video_path, 'estimation_rod_only', f'{prefix}.png'), vis_im_bgr)
+            # cv2.imwrite(os.path.join(video_path, 'estimation_rod_only', f'{prefix}.png'), vis_im_bgr)
 
             # scene_pcd = perception_utils.create_pcd(depth_im, data_cfg['cam_intr'], color_im,
             #                                         depth_trunc=data_cfg['depth_trunc'])
-            robot_cloud = o3d.geometry.PointCloud()
-            for color, (u, v) in data_cfg['color_to_rod'].items():
-                rod_pcd = copy.deepcopy(tracker.rod_pcd)
-                rod_pcd = rod_pcd.paint_uniform_color(np.array(Tracker.ColorDict[color]) / 255)
-                rod_pose = copy.deepcopy(tracker.G.edges[u, v]['pose_list'][-1])
-                rod_pcd.transform(rod_pose)
-                robot_cloud += rod_pcd
+            # robot_cloud = o3d.geometry.PointCloud()
+            # for color, (u, v) in data_cfg['color_to_rod'].items():
+            #     rod_pcd = copy.deepcopy(tracker.rod_pcd)
+            #     rod_pcd = rod_pcd.paint_uniform_color(np.array(Tracker.ColorDict[color]) / 255)
+            #     rod_pose = copy.deepcopy(tracker.G.edges[u, v]['pose_list'][-1])
+            #     rod_pcd.transform(rod_pose)
+            #     robot_cloud += rod_pcd
 
-            estimation_cloud = robot_cloud
+            # estimation_cloud = robot_cloud
             # estimation_cloud = robot_cloud + scene_pcd
             # o3d.io.write_point_cloud(os.path.join(video_path, "scene_cloud", f"{idx:04d}.ply"), scene_pcd)
-            o3d.io.write_point_cloud(os.path.join(video_path, "estimation_cloud", f"{idx:04d}.ply"), estimation_cloud)
+            # o3d.io.write_point_cloud(os.path.join(video_path, "estimation_cloud", f"{idx:04d}.ply"), estimation_cloud)
 
     # save rod poses and end cap positions to file
     pose_output_folder = os.path.join(video_path, "poses")
