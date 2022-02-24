@@ -20,7 +20,8 @@ def visualize(visualizer, data_cfg, vis_cloud):
     cam_intr_vis.set_intrinsics(data_cfg['im_w'], data_cfg['im_h'], fx, fy, cx, cy)
     cam_params = o3d.camera.PinholeCameraParameters()
     cam_params.intrinsic = cam_intr_vis
-    cam_params.extrinsic = data_cfg['cam_extr']
+    cam_params.extrinsic = np.eye(4)
+    # cam_params.extrinsic = data_cfg['cam_extr']
 
     visualizer.get_view_control().convert_from_pinhole_camera_parameters(cam_params)
     visualizer.poll_events()
@@ -30,9 +31,11 @@ def visualize(visualizer, data_cfg, vis_cloud):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument("--dataset", default="dataset")
-    parser.add_argument("--video_id", default="dynamic")
+    parser.add_argument("--video_id", default="socks6")
+    # parser.add_argument("--video_id", default="dynamic")
     parser.add_argument("--rod_mesh_file", default="pcd/yale/untethered_rod_w_end_cap.ply")
-    parser.add_argument("--first_frame_id", default=20, type=int)
+    parser.add_argument("--first_frame_id", default=50, type=int)
+    # parser.add_argument("--first_frame_id", default=20, type=int)
     parser.add_argument("--window_size", default=15, type=int)
     args = parser.parse_args()
 
@@ -77,9 +80,8 @@ if __name__ == '__main__':
     for i in range(t, N - t):
         scene_pcd_path = os.path.join(args.dataset, args.video_id, 'scene_cloud', f"{(args.first_frame_id + i):04d}.ply")
         scene_cloud = o3d.io.read_point_cloud(scene_pcd_path)
-
-        vis_cloud = scene_cloud
-        vis_cloud2 = scene_cloud
+        # vis_cloud = scene_cloud
+        vis_cloud = o3d.geometry.PointCloud()
 
         for color in data_cfg['end_cap_colors']:
             mean_rot_hat = np.zeros((3, 3))
@@ -113,7 +115,8 @@ if __name__ == '__main__':
 
         visualize(visualizer, data_cfg, vis_cloud)
         o3d.io.write_point_cloud(os.path.join(args.dataset, args.video_id, "smoothed_estimation_cloud", f"{i:04d}.ply"), vis_cloud)
-        visualizer.capture_screen_image(os.path.join(args.dataset, args.video_id, "smoothed_estimation", f"{i:04d}.png"))
+        # visualizer.capture_screen_image(os.path.join(args.dataset, args.video_id, "smoothed_estimation", f"{i:04d}.png"))
+        visualizer.capture_screen_image(os.path.join(args.dataset, args.video_id, "smoothed_estimation_without_physical", f"{i:04d}.png"))
 
     for color in data_cfg['end_cap_colors']:
         np.save(os.path.join(pose_output_folder, f'{color}.npy'), smoothed_color_poses[color])

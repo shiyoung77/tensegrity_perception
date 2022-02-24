@@ -7,6 +7,7 @@ import pprint
 import json
 from argparse import ArgumentParser
 from typing import List, Dict
+from venv import create
 
 import numpy as np
 import numpy.linalg as la
@@ -265,6 +266,7 @@ class Tracker:
         depth_im_gpu = torch.from_numpy(depth_im).cuda()
 
         # get observed 3D points for both end caps of each rod
+        tic = time.time()
         obs_pts_dict = dict()
         for color, (u, v) in self.data_cfg['color_to_rod'].items():
             hsv_mask = self.compute_hsv_mask(color_im, color)
@@ -277,9 +279,11 @@ class Tracker:
 
             augmented_obs_pts = torch.vstack([obs_pts, fake_pts])
             obs_pts_dict[color] = augmented_obs_pts
+        # print(f"color filter takes: {time.time() - tic}s")
 
         for iter in range(max_iter):
             # render current state (end caps only)
+
             tic = time.time()
             mesh_nodes = dict()
             for color, (u, v) in self.data_cfg['color_to_rod'].items():
@@ -413,14 +417,31 @@ class Tracker:
         # be VERY CAREFUL when generating a lambda function in a for loop
         # https://stackoverflow.com/questions/45491376/
         # https://docs.python-guide.org/writing/gotchas/#late-binding-closures
-        rod_constraints = []
+        constraints = []
         for _, (u, v) in self.data_cfg['color_to_rod'].items():
             constraint = dict()
             constraint['type'] = 'eq'
-            constraint['fun'], constraint['jac'] = self.constraint_function_generator(u, v, rod_length)
-            rod_constraints.append(constraint)
+            constraint['fun'], constraint['jac'] = self.endcap_constraint_generator(u, v, rod_length)
+            constraints.append(constraint)
 
-        res = minimize(obj_func, init_values, jac=jac_func, method='SLSQP', constraints=rod_constraints)
+        rods = list(self.data_cfg['color_to_rod'].values())
+        for i, (u, v) in enumerate(rods):
+            p1 = self.G.nodes[u]['pos_list'][-1]
+            p2 = self.G.nodes[v]['pos_list'][-1]
+            for p, q in rods[i + 1:]:
+                p3 = self.G.nodes[p]['pos_list'][-1]
+                p4 = self.G.nodes[q]['pos_list'][-1]
+
+                alpha1, alpha2 = self.compute_closest_pair_of_points(p1, p2, p3, p4)
+                if alpha1 < 0 or alpha1 > 1 or alpha2 < 0 or alpha2 > 1:
+                    continue
+
+                constraint = dict()
+                constraint['type'] = 'ineq'
+                constraint['fun'], constraint['jac'] = self.rod_constraint_generator(u, v, p, q, alpha1, alpha2, rod_diameter=0.04)
+                constraints.append(constraint)
+
+        res = minimize(obj_func, init_values, jac=jac_func, method='SLSQP', constraints=constraints)
         assert res.success, "Optimization fail! Something must be wrong."
 
         for i in range(num_end_caps):
@@ -428,7 +449,7 @@ class Tracker:
             if la.norm(res.x[(3 * i):(3 * i + 3)] - self.G.nodes[i]['pos_list'][-1]) < 0.1:
                 self.G.nodes[i]['pos_list'][-1] = res.x[(3 * i):(3 * i + 3)].copy()
 
-        for color, (u, v) in self.data_cfg['color_to_rod'].items():
+        for u, v in self.data_cfg['color_to_rod'].values():
             prev_rod_pose = self.G.edges[u, v]['pose_list'][-1]
             u_pos = self.G.nodes[u]['pos_list'][-1]
             v_pos = self.G.nodes[v]['pos_list'][-1]
@@ -468,7 +489,7 @@ class Tracker:
                 binary_loss += factor * (estimated_length - measured_length)**2
 
             return unary_loss + binary_loss
-        
+
         def jacobian_function(X):
             result = np.zeros_like(X)
 
@@ -477,7 +498,7 @@ class Tracker:
                 x, y, z = X[3*i : 3*i + 3]
                 confidence = self.G.nodes[i].get('confidence', 1)
                 result[3*i : 3*i + 3] = 2*confidence*np.array([x - x_hat, y - y_hat, z - z_hat])
-            
+
             for sensor_id, (u, v) in self.data_cfg['sensor_to_tendon'].items():
                 sensor_id = str(sensor_id)
                 if not sensor_status[sensor_id] or sensor_measurement[sensor_id]['length'] <= 0:
@@ -497,19 +518,19 @@ class Tracker:
                 l_gt = sensor_measurement[sensor_id]['length'] / 100
                 result[3*u : 3*u + 3] += 2*factor*(l_est - l_gt)*np.array([u_x - v_x, u_y - v_y, u_z - v_z]) / l_est
                 result[3*v : 3*v + 3] += 2*factor*(l_est - l_gt)*np.array([v_x - u_x, v_y - u_y, v_z - u_z]) / l_est
-            
+
             return result
 
         return objective_function, jacobian_function
 
 
-    def constraint_function_generator(self, u, v, rod_length):
+    def endcap_constraint_generator(self, u, v, rod_length):
 
         def constraint_function(X):
             u_pos = X[3 * u: 3 * u + 3]
             v_pos = X[3 * v: 3 * v + 3]
             return la.norm(u_pos - v_pos) - rod_length
-        
+
         def jacobian_function(X):
             u_x, u_y, u_z = X[3 * u : 3 * u + 3]
             v_x, v_y, v_z = X[3 * v : 3 * v + 3]
@@ -518,7 +539,38 @@ class Tracker:
             result[3 * u : 3 * u + 3] = np.array([u_x - v_x, u_y - v_y, u_z - v_z]) / C
             result[3 * v : 3 * v + 3] = np.array([v_x - u_x, v_y - u_y, v_z - u_z]) / C
             return result
-        
+
+        return constraint_function, jacobian_function
+
+
+    def rod_constraint_generator(self, u, v, p, q, alpha1, alpha2, rod_diameter):
+        p1 = self.G.nodes[u]['pos_list'][-1]
+        p2 = self.G.nodes[v]['pos_list'][-1]
+        p3 = self.G.nodes[p]['pos_list'][-1]
+        p4 = self.G.nodes[q]['pos_list'][-1]
+        p5 = alpha1 * p1 + (1 - alpha1) * p2  # closest point on (u, v)
+        p6 = alpha2 * p3 + (1 - alpha2) * p4  # closest point on (p, q)
+        v1 = p5 - p6
+        v1 /= la.norm(v1)
+
+        def constraint_function(X):
+            q1 = X[3 * u : 3 * u + 3]
+            q2 = X[3 * v : 3 * v + 3]
+            q3 = X[3 * p : 3 * p + 3]
+            q4 = X[3 * q : 3 * q + 3]
+            q5 = alpha1 * q1 + (1 - alpha1) * q2  # closest point on (u, v)
+            q6 = alpha2 * q3 + (1 - alpha2) * q4  # closest point on (p, q)
+            v2 = q5 - q6
+            return v1 @ v2 - rod_diameter
+
+        def jacobian_function(X):
+            result = np.zeros_like(X)
+            result[3 * u : 3 * u + 3] = alpha1 * v1
+            result[3 * v : 3 * v + 3] = (1 - alpha1) * v1
+            result[3 * p : 3 * p + 3] = -alpha2 * v1
+            result[3 * q : 3 * q + 3] = -(1 - alpha2) * v1
+            return result
+
         return constraint_function, jacobian_function
 
 
@@ -571,11 +623,12 @@ class Tracker:
             curr_rod_pose[:3, :3] = rx_pi @ curr_rod_pose[:3, :3]
             curr_z_dir = curr_rod_pose[:3, 2]
 
-        prev_endcap_pos = prev_rod_pos + self.data_cfg['rod_length'] / 2 * prev_z_dir
-        curr_endcap_pos = curr_rod_pos + self.data_cfg['rod_length'] / 2 * curr_z_dir
-        endcap_distance = la.norm(curr_endcap_pos - prev_endcap_pos)
-        if not init and (curr_z_dir @ prev_z_dir < 0.9 or endcap_distance > 0.015):
-            curr_rod_pose = np.copy(prev_rod_pose)
+        # prev_endcap_pos = prev_rod_pos + self.data_cfg['rod_length'] / 2 * prev_z_dir
+        # curr_endcap_pos = curr_rod_pos + self.data_cfg['rod_length'] / 2 * curr_z_dir
+        # endcap_distance = la.norm(curr_endcap_pos - prev_endcap_pos)
+        # if not init and (curr_z_dir @ prev_z_dir < 0.9 or endcap_distance > 0.005):
+        #     curr_rod_pose = np.copy(prev_rod_pose)
+
         return curr_rod_pose
 
 
@@ -610,7 +663,74 @@ class Tracker:
         delta_T[:3, 3:4] = t.cpu().numpy()
         return delta_T @ init_pose
 
+
     # https://math.stackexchange.com/questions/1993953/closest-points-between-two-lines
+    @staticmethod
+    def compute_closest_pair_of_points(p1: np.ndarray, p2: np.ndarray, p3: np.ndarray, p4: np.ndarray):
+        """compute closest point pairs on two rods (p1, p2) and (p3, p4)
+
+        Args:
+            p1 (np.ndarray): start point of rod 1
+            p2 (np.ndarray): end point of rod 1
+            p3 (np.ndarray): start point of rod 2
+            p4 (np.ndarray): end point of rod 2
+        """
+        v1 = p2 - p1
+        l1 = la.norm(v1)
+        v1 /= l1
+
+        v2 = p4 - p3
+        l2 = la.norm(v2)
+        v2 /= l2
+
+        v3 = np.cross(v2, v1)
+        rhs = p3 - p1
+        lhs = np.array([v1, -v2, v3]).T
+        t1, t2, _ = la.solve(lhs, rhs)
+        alpha1 = 1 - t1 / l1
+        alpha2 = 1 - t2 / l2
+        return alpha1, alpha2
+
+
+    def visualize_closest_pair_of_points(self):
+
+        def create_geometries_for_vis(p1, p2, color, radius=0.01):
+            sphere1 = o3d.geometry.TriangleMesh.create_sphere(radius=radius)
+            sphere1.paint_uniform_color(color)
+            sphere1.translate(p1)
+
+            sphere2 = o3d.geometry.TriangleMesh.create_sphere(radius=radius)
+            sphere2.paint_uniform_color(color)
+            sphere2.translate(p2)
+
+            points = [p1.tolist(), p2.tolist()]
+            lines = [[0, 1]]
+            line_set = o3d.geometry.LineSet(points=o3d.utility.Vector3dVector(points), lines=o3d.utility.Vector2iVector(lines))
+            return [sphere1, sphere2, line_set]
+
+        geometries = []
+        for color, (u, v) in self.data_cfg['color_to_rod'].items():
+            p1 = self.G.nodes[u]['pos_list'][-1]
+            p2 = self.G.nodes[v]['pos_list'][-1]
+            geometries.extend(create_geometries_for_vis(p1, p2, np.array(self.ColorDict[color]) / 255))
+
+        rods = list(self.data_cfg['color_to_rod'].values())
+        for i in range(len(rods)):
+            u, v = rods[i]
+            p1 = self.G.nodes[u]['pos_list'][-1]
+            p2 = self.G.nodes[v]['pos_list'][-1]
+
+            for j in range(i + 1, len(rods)):
+                p, q = rods[j]
+                p3 = self.G.nodes[p]['pos_list'][-1]
+                p4 = self.G.nodes[q]['pos_list'][-1]
+
+                alpha1, alpha2 = self.compute_closest_pair_of_points(p1, p2, p3, p4)
+                p5 = alpha1 * p1 + (1 - alpha1) * p2
+                p6 = alpha2 * p3 + (1 - alpha2) * p4
+                geometries.extend(create_geometries_for_vis(p5, p6, [1, 1, 0], radius=0.005))
+
+        o3d.visualization.draw_geometries(geometries)
 
 
 if __name__ == '__main__':
@@ -711,7 +831,7 @@ if __name__ == '__main__':
         tic = time.time()
         tracker.update(color_im, depth_im, info, args.max_iter)
         # print(f"update takes: {time.time() - tic}s")
-        # os.makedirs(os.path.join(video_path, 'estimation_rod_only'), exist_ok=True)
+        os.makedirs(os.path.join(video_path, 'estimation_rod_only'), exist_ok=True)
 
         if args.visualize:
             rendered_seg, rendered_depth = tracker.render_current_state()
@@ -729,22 +849,22 @@ if __name__ == '__main__':
             key = cv2.waitKey(1)
             if key == ord('q'):
                 exit(0)
-            # cv2.imwrite(os.path.join(video_path, 'estimation_rod_only', f'{prefix}.png'), vis_im_bgr)
+            cv2.imwrite(os.path.join(video_path, 'estimation_rod_only', f'{prefix}.png'), vis_im_bgr)
 
             # scene_pcd = perception_utils.create_pcd(depth_im, data_cfg['cam_intr'], color_im,
             #                                         depth_trunc=data_cfg['depth_trunc'])
+            robot_cloud = o3d.geometry.PointCloud()
+            for color, (u, v) in data_cfg['color_to_rod'].items():
+                rod_pcd = copy.deepcopy(tracker.rod_pcd)
+                rod_pcd = rod_pcd.paint_uniform_color(np.array(Tracker.ColorDict[color]) / 255)
+                rod_pose = copy.deepcopy(tracker.G.edges[u, v]['pose_list'][-1])
+                rod_pcd.transform(rod_pose)
+                robot_cloud += rod_pcd
 
-            # robot_cloud = o3d.geometry.PointCloud()
-            # for color, (u, v) in data_cfg['color_to_rod'].items():
-            #     rod_pcd = copy.deepcopy(tracker.rod_pcd)
-            #     rod_pcd = rod_pcd.paint_uniform_color(np.array(Tracker.ColorDict[color]) / 255)
-            #     rod_pose = copy.deepcopy(tracker.G.edges[u, v]['pose_list'][-1])
-            #     rod_pcd.transform(rod_pose)
-            #     robot_cloud += rod_pcd
-
+            estimation_cloud = robot_cloud
             # estimation_cloud = robot_cloud + scene_pcd
             # o3d.io.write_point_cloud(os.path.join(video_path, "scene_cloud", f"{idx:04d}.ply"), scene_pcd)
-            # o3d.io.write_point_cloud(os.path.join(video_path, "estimation_cloud", f"{idx:04d}.ply"), estimation_cloud)
+            o3d.io.write_point_cloud(os.path.join(video_path, "estimation_cloud", f"{idx:04d}.ply"), estimation_cloud)
 
     # save rod poses and end cap positions to file
     pose_output_folder = os.path.join(video_path, "poses")
