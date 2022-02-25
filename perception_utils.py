@@ -168,6 +168,7 @@ def np_rotmat_of_two_v(v1, v2):
             vHatSq = np.dot(vHat, vHat)
             rotmat = np.eye(3) + s * vHat + (1 - c) * vHatSq
     assert np.allclose(v2, rotmat.dot(v1))
+    assert np.cross(rotmat[:, 0], rotmat[:, 1]).dot(rotmat[:, 2]) > 0
     return rotmat
 
 
