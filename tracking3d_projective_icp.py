@@ -462,8 +462,10 @@ class Tracker:
                 R2 = self.G.edges[u, v]['pose_list'][-1][:3, :3]
                 if R1[:, 0] @ R2[:, 0] < 0:
                     self.G.edges[u, v]['pose_list'][-1][:3, 0] *= -1
+                    self.estimate_rod_pose_from_end_cap_centers(curr_end_cap_centers, prev_rod_pose)
                 if R1[:, 1] @ R2[:, 1] < 0:
                     self.G.edges[u, v]['pose_list'][-1][:3, 1] *= -1
+                    self.estimate_rod_pose_from_end_cap_centers(curr_end_cap_centers, prev_rod_pose)
             except:
                 pass
 
@@ -620,9 +622,13 @@ class Tracker:
         prev_rot = prev_rod_pose[:3, :3]
         prev_z_dir = np.copy(prev_rot[:, 2])
 
+        assert np.cross(prev_rot[:, 0], prev_rot[:, 1]).dot(prev_rot[:, 2]) > 0
+
         # https://math.stackexchange.com/questions/180418/
         delta_rot = perception_utils.np_rotmat_of_two_v(v1=prev_z_dir, v2=curr_z_dir)
+        assert np.cross(delta_rot[:, 0], delta_rot[:, 1]).dot(delta_rot[:, 2]) > 0
         curr_rot = delta_rot @ prev_rot
+        assert np.cross(curr_rot[:, 0], curr_rot[:, 1]).dot(curr_rot[:, 2]) > 0
         curr_rod_pose = np.eye(4)
         curr_rod_pose[:3, :3] = curr_rot
         curr_rod_pose[:3, 3] = curr_rod_pos
