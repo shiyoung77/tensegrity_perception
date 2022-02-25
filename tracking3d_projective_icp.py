@@ -457,6 +457,16 @@ class Tracker:
             optimized_pose = self.estimate_rod_pose_from_end_cap_centers(curr_end_cap_centers, prev_rod_pose)
             self.G.edges[u, v]['pose_list'][-1] = optimized_pose
 
+            try:
+                R1 = self.G.edges[u, v]['pose_list'][-2][:3, :3]
+                R2 = self.G.edges[u, v]['pose_list'][-1][:3, :3]
+                if R1[:, 0] @ R2[:, 0] < 0:
+                    self.G.edges[u, v]['pose_list'][-1][:3, 0] *= -1
+                if R1[:, 1] @ R2[:, 1] < 0:
+                    self.G.edges[u, v]['pose_list'][-1][:3, 1] *= -1
+            except:
+                pass
+
 
     def objective_function_generator(self, sensor_measurement, sensor_status):
 
@@ -544,10 +554,16 @@ class Tracker:
 
 
     def rod_constraint_generator(self, u, v, p, q, alpha1, alpha2, rod_diameter):
-        p1 = self.G.nodes[u]['pos_list'][-1]
-        p2 = self.G.nodes[v]['pos_list'][-1]
-        p3 = self.G.nodes[p]['pos_list'][-1]
-        p4 = self.G.nodes[q]['pos_list'][-1]
+        try:
+            p1 = self.G.nodes[u]['pos_list'][-2]
+            p2 = self.G.nodes[v]['pos_list'][-2]
+            p3 = self.G.nodes[p]['pos_list'][-2]
+            p4 = self.G.nodes[q]['pos_list'][-2]
+        except:
+            p1 = self.G.nodes[u]['pos_list'][-1]
+            p2 = self.G.nodes[v]['pos_list'][-1]
+            p3 = self.G.nodes[p]['pos_list'][-1]
+            p4 = self.G.nodes[q]['pos_list'][-1]
         p5 = alpha1 * p1 + (1 - alpha1) * p2  # closest point on (u, v)
         p6 = alpha2 * p3 + (1 - alpha2) * p4  # closest point on (p, q)
         v1 = p5 - p6
@@ -598,37 +614,18 @@ class Tracker:
         curr_z_dir = curr_end_cap_centers[0] - curr_end_cap_centers[1]
         curr_z_dir /= la.norm(curr_z_dir)
 
-        init = False
         if prev_rod_pose is None:
-            init = True
             prev_rod_pose = np.eye(4)
 
         prev_rot = prev_rod_pose[:3, :3]
         prev_z_dir = np.copy(prev_rot[:, 2])
-        prev_rod_pos = np.copy(prev_rod_pose[:3, 3])
 
         # https://math.stackexchange.com/questions/180418/
         delta_rot = perception_utils.np_rotmat_of_two_v(v1=prev_z_dir, v2=curr_z_dir)
+        curr_rot = delta_rot @ prev_rot
         curr_rod_pose = np.eye(4)
-        curr_rod_pose[:3, :3] = delta_rot @ prev_rot
+        curr_rod_pose[:3, :3] = curr_rot
         curr_rod_pose[:3, 3] = curr_rod_pos
-
-        rx_pi = np.array([
-            [1, 0, 0],
-            [0, -1, 0],
-            [0, 0, -1],
-        ])
-
-        if not init and curr_z_dir @ prev_z_dir < 0:
-            curr_rod_pose[:3, :3] = rx_pi @ curr_rod_pose[:3, :3]
-            curr_z_dir = curr_rod_pose[:3, 2]
-
-        # prev_endcap_pos = prev_rod_pos + self.data_cfg['rod_length'] / 2 * prev_z_dir
-        # curr_endcap_pos = curr_rod_pos + self.data_cfg['rod_length'] / 2 * curr_z_dir
-        # endcap_distance = la.norm(curr_endcap_pos - prev_endcap_pos)
-        # if not init and (curr_z_dir @ prev_z_dir < 0.9 or endcap_distance > 0.005):
-        #     curr_rod_pose = np.copy(prev_rod_pose)
-
         return curr_rod_pose
 
 
@@ -849,7 +846,7 @@ if __name__ == '__main__':
             key = cv2.waitKey(1)
             if key == ord('q'):
                 exit(0)
-            # cv2.imwrite(os.path.join(video_path, 'estimation_rod_only', f'{prefix}.png'), vis_im_bgr)
+            cv2.imwrite(os.path.join(video_path, 'estimation_rod_only', f'{prefix}.png'), vis_im_bgr)
 
             # scene_pcd = perception_utils.create_pcd(depth_im, data_cfg['cam_intr'], color_im,
             #                                         depth_trunc=data_cfg['depth_trunc'])
