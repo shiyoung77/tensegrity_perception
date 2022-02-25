@@ -312,7 +312,11 @@ class Tracker:
 
                 obs_pts = obs_pts_dict[color]
                 prev_pose = self.G.edges[u, v]['pose_list'][-1].copy()
+                rot_mat = prev_pose[:3, :3]
+                assert np.cross(rot_mat[:, 0], rot_mat[:, 1]).dot(rot_mat[:, 2]) > 0
                 rod_pose = self.projective_icp_cuda(obs_pts, rendered_pts, prev_pose, max_distance=0.1, verbose=False)
+                rot_mat = rod_pose[:3, :3]
+                assert np.cross(rot_mat[:, 0], rot_mat[:, 1]).dot(rot_mat[:, 2]) > 0
 
                 if iter == 0:
                     self.G.edges[u, v]['pose_list'].append(rod_pose)
