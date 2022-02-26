@@ -312,11 +312,7 @@ class Tracker:
 
                 obs_pts = obs_pts_dict[color]
                 prev_pose = self.G.edges[u, v]['pose_list'][-1].copy()
-                rot_mat = prev_pose[:3, :3]
-                assert np.cross(rot_mat[:, 0], rot_mat[:, 1]).dot(rot_mat[:, 2]) > 0
                 rod_pose = self.projective_icp_cuda(obs_pts, rendered_pts, prev_pose, max_distance=0.1, verbose=False)
-                rot_mat = rod_pose[:3, :3]
-                assert np.cross(rot_mat[:, 0], rot_mat[:, 1]).dot(rot_mat[:, 2]) > 0
 
                 if iter == 0:
                     self.G.edges[u, v]['pose_list'].append(rod_pose)
@@ -338,7 +334,6 @@ class Tracker:
             # confidence_u, confidence_v = self.compute_confidence(obs_depth_im, rendered_depth, rendered_seg,
             #                                                      inlier_thresh=0.03)
 
-            # if (iter + 1) % 3 == 0:
             tic = time.time()
             self.constrained_optimization(info)
             # print(f"optimization takes {time.time() - tic}s")
@@ -460,18 +455,6 @@ class Tracker:
             curr_end_cap_centers = np.vstack([u_pos, v_pos])
             optimized_pose = self.estimate_rod_pose_from_end_cap_centers(curr_end_cap_centers, prev_rod_pose)
             self.G.edges[u, v]['pose_list'][-1] = optimized_pose
-
-            try:
-                R1 = self.G.edges[u, v]['pose_list'][-2][:3, :3]
-                R2 = self.G.edges[u, v]['pose_list'][-1][:3, :3]
-                if R1[:, 0] @ R2[:, 0] < 0:
-                    self.G.edges[u, v]['pose_list'][-1][:3, 0] *= -1
-                    self.estimate_rod_pose_from_end_cap_centers(curr_end_cap_centers, prev_rod_pose)
-                if R1[:, 1] @ R2[:, 1] < 0:
-                    self.G.edges[u, v]['pose_list'][-1][:3, 1] *= -1
-                    self.estimate_rod_pose_from_end_cap_centers(curr_end_cap_centers, prev_rod_pose)
-            except:
-                pass
 
 
     def objective_function_generator(self, sensor_measurement, sensor_status):
@@ -626,20 +609,17 @@ class Tracker:
         prev_rot = prev_rod_pose[:3, :3]
         prev_z_dir = np.copy(prev_rot[:, 2])
 
-        assert np.cross(prev_rot[:, 0], prev_rot[:, 1]).dot(prev_rot[:, 2]) > 0
-
         # https://math.stackexchange.com/questions/180418/
         delta_rot = perception_utils.np_rotmat_of_two_v(v1=prev_z_dir, v2=curr_z_dir)
-        assert np.cross(delta_rot[:, 0], delta_rot[:, 1]).dot(delta_rot[:, 2]) > 0
-        curr_rot = delta_rot @ prev_rot
-        assert np.cross(curr_rot[:, 0], curr_rot[:, 1]).dot(curr_rot[:, 2]) > 0
+
         curr_rod_pose = np.eye(4)
-        curr_rod_pose[:3, :3] = curr_rot
+        curr_rod_pose[:3, :3] = delta_rot @ prev_rot
         curr_rod_pose[:3, 3] = curr_rod_pos
         return curr_rod_pose
 
 
-    def projective_icp_cuda(self, obs_pts, rendered_pts, init_pose, max_distance=0.02, verbose=False):
+    def projective_icp_cuda(self, obs_pts: torch.Tensor, rendered_pts: torch.Tensor,
+                            init_pose: np.ndarray, max_distance=0.02, verbose=False):
         # nearest neighbor data association
         distances = torch.norm(obs_pts.unsqueeze(1) - rendered_pts.unsqueeze(0), dim=2)  # (N, M)
         closest_distance, closest_indices = torch.min(distances, dim=1)
@@ -655,10 +635,16 @@ class Tracker:
         Q_mean = Q.mean(1, keepdims=True)  # (3, 1)
 
         H = (Q - Q_mean) @ (P - P_mean).T
-        U, D, V = torch.svd(H)  # H must ba float64 !!!
-        R = U @ V.T  # otherwise, R is not orthonormal (error > 1e-4)
-        t = Q_mean - R @ P_mean
-        assert torch.allclose((R.T @ R).cpu(), torch.eye(3, dtype=torch.double))
+        U, D, V = torch.svd(H.cpu())  # SVD on CPU is 100x faster than on GPU
+        # ensure that R is in the right-hand coordinate system, very important!!!
+        # https://en.wikipedia.org/wiki/Kabsch_algorithm
+        d = torch.sign(torch.det(U @ V.T))
+        R = U @ torch.tensor([
+            [1, 0, 0],
+            [0, 1, 0],
+            [0, 0, d]
+        ], dtype=torch.float64) @ V.T
+        t = Q_mean - R.cuda() @ P_mean
 
         if verbose:
             error_before = torch.mean(torch.norm(Q - P, dim=0)).item()
