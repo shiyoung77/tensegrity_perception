@@ -1,4 +1,3 @@
-import enum
 import os
 import time
 import copy
@@ -7,14 +6,14 @@ import pprint
 import json
 from argparse import ArgumentParser
 from typing import List, Dict
-from venv import create
 
 import numpy as np
-import numpy.linalg as la
+import scipy.linalg as la
 import torch
 import cv2
 import networkx as nx
 import open3d as o3d
+from pyquaternion import Quaternion
 from scipy.optimize import minimize
 from matplotlib import pyplot as plt
 from tqdm import tqdm
@@ -152,6 +151,9 @@ class Tracker:
         complete_obs_depth = np.zeros_like(depth_im)
         complete_obs_mask = np.zeros((H, W), dtype=np.bool8)
 
+        # vis_rendered_pts = []
+        # vis_obs_pts = []
+
         for color, (u, v) in self.data_cfg['color_to_rod'].items():
             end_cap_centers = []
             obs_depth_im = np.zeros_like(depth_im)
@@ -170,6 +172,7 @@ class Tracker:
                     hsv_mask |= cv2.inRange(color_im_hsv, lowerb=(0, 80, 50), upperb=(20, 255, 255)).astype(np.bool8)
                 mask &= hsv_mask
                 assert mask.sum() > 0, f"node {node} ({color}) has no points observable in the initial frame."
+                print(f"{color}-{u} has {mask.sum()} points.")
                 obs_depth_im[mask] = depth_im[mask]
                 masked_depth_im = depth_im * mask
                 complete_obs_mask |= mask
@@ -190,11 +193,23 @@ class Tracker:
             mesh_nodes = [self.create_scene_node(str(i), self.end_cap_meshes[i], init_pose) for i in range(2)]
             rendered_depth_im = self.render_nodes(mesh_nodes, depth_only=True)
             rendered_pts, _ = self.back_projection(torch.from_numpy(rendered_depth_im).cuda())
-            rod_pose = self.projective_icp_cuda(obs_pts, rendered_pts, init_pose, max_distance=0.02, verbose=False)
+            rod_pose, Q, P = self.projective_icp_cuda(obs_pts, rendered_pts, init_pose, max_distance=0.1, verbose=False)
+
+            # vis_obs_pts.append(Q)
+            # vis_rendered_pts.append(P)
 
             self.G.edges[u, v]['pose_list'].append(rod_pose)
             self.G.nodes[u]['pos_list'].append(rod_pose[:3, 3] + rod_pose[:3, 2] * self.rod_length / 2)
             self.G.nodes[v]['pos_list'].append(rod_pose[:3, 3] - rod_pose[:3, 2] * self.rod_length / 2)
+
+        # vis_obs_pts = torch.vstack(vis_obs_pts).cpu().numpy()
+        # obs_pcd = o3d.geometry.PointCloud()
+        # obs_pcd.points = o3d.utility.Vector3dVector(vis_obs_pts)
+        # obs_pcd = obs_pcd.paint_uniform_color([0, 0, 0])
+        # vis_rendered_pts = torch.vstack(vis_rendered_pts).cpu().numpy()
+        # rendered_pcd = o3d.geometry.PointCloud()
+        # rendered_pcd.points = o3d.utility.Vector3dVector(vis_rendered_pts)
+        # o3d.visualization.draw_geometries([rendered_pcd, obs_pcd])
 
         complete_obs_color[complete_obs_mask] = color_im[complete_obs_mask]
         complete_obs_depth[complete_obs_mask] = depth_im[complete_obs_mask]
@@ -211,14 +226,14 @@ class Tracker:
             axes[1, 1].imshow(complete_obs_depth)
             plt.show()
 
-            robot_cloud = o3d.geometry.PointCloud()
+            vis_geometries = [scene_pcd]
             for color, (u, v) in self.data_cfg['color_to_rod'].items():
                 rod_pcd = copy.deepcopy(self.rod_pcd)
                 rod_pcd = rod_pcd.paint_uniform_color(np.array(Tracker.ColorDict[color]) / 255)
                 rod_pose = self.G.edges[u, v]['pose_list'][-1]
                 rod_pcd.transform(rod_pose)
-                robot_cloud += rod_pcd
-            o3d.visualization.draw_geometries([scene_pcd, robot_cloud])
+                vis_geometries.append(rod_pcd)
+            o3d.visualization.draw_geometries(vis_geometries)
 
         self.initialized = True
 
@@ -242,8 +257,8 @@ class Tracker:
         hsv_mask = cv2.inRange(color_im_hsv,
                             lowerb=tuple(self.data_cfg['hsv_ranges'][color][0]),
                             upperb=tuple(self.data_cfg['hsv_ranges'][color][1])).astype(np.bool8)
-        if color == 'red':
-            hsv_mask |= cv2.inRange(color_im_hsv, lowerb=(0, 80, 50), upperb=(15, 255, 255)).astype(np.bool8)
+        # if color == 'red':
+        #     hsv_mask |= cv2.inRange(color_im_hsv, lowerb=(0, 80, 50), upperb=(15, 255, 255)).astype(np.bool8)
         return hsv_mask
 
 
@@ -312,7 +327,7 @@ class Tracker:
 
                 obs_pts = obs_pts_dict[color]
                 prev_pose = self.G.edges[u, v]['pose_list'][-1].copy()
-                rod_pose = self.projective_icp_cuda(obs_pts, rendered_pts, prev_pose, max_distance=0.1, verbose=False)
+                rod_pose, Q, P = self.projective_icp_cuda(obs_pts, rendered_pts, prev_pose, max_distance=0.1, verbose=False)
 
                 if iter == 0:
                     self.G.edges[u, v]['pose_list'].append(rod_pose)
@@ -437,7 +452,7 @@ class Tracker:
 
                 constraint = dict()
                 constraint['type'] = 'ineq'
-                constraint['fun'], constraint['jac'] = self.rod_constraint_generator(u, v, p, q, alpha1, alpha2, rod_diameter=0.04)
+                constraint['fun'], constraint['jac'] = self.rod_constraint_generator(u, v, p, q, alpha1, alpha2, rod_diameter=0.03)
                 constraints.append(constraint)
 
         res = minimize(obj_func, init_values, jac=jac_func, method='SLSQP', constraints=constraints)
@@ -447,6 +462,8 @@ class Tracker:
             # sanity check in case the constraint optimization fails
             if la.norm(res.x[(3 * i):(3 * i + 3)] - self.G.nodes[i]['pos_list'][-1]) < 0.1:
                 self.G.nodes[i]['pos_list'][-1] = res.x[(3 * i):(3 * i + 3)].copy()
+            else:
+                print("Endcap position sanity check failed.")
 
         for u, v in self.data_cfg['color_to_rod'].values():
             prev_rod_pose = self.G.edges[u, v]['pose_list'][-1]
@@ -475,7 +492,7 @@ class Tracker:
 
                 u_confidence = self.G.nodes[u].get('confidence', 1)
                 v_confidence = self.G.nodes[v].get('confidence', 1)
-                factor = 1
+                factor = 0.2
                 # if u_confidence > 0.5 and v_confidence > 0.5:
                 #     factor = 0
                 # if u_confidence < 0.2 or v_confidence <= 0.2:
@@ -484,7 +501,7 @@ class Tracker:
                 u_pos = X[(3 * u):(3 * u + 3)]
                 v_pos = X[(3 * v):(3 * v + 3)]
                 estimated_length = la.norm(u_pos - v_pos)
-                measured_length = sensor_measurement[sensor_id]['length'] / 100
+                measured_length = sensor_measurement[sensor_id]['length'] / 1000
                 binary_loss += factor * (estimated_length - measured_length)**2
 
             return unary_loss + binary_loss
@@ -505,7 +522,7 @@ class Tracker:
 
                 u_confidence = self.G.nodes[u].get('confidence', 1)
                 v_confidence = self.G.nodes[v].get('confidence', 1)
-                factor = 1
+                factor = 0.2
                 # if u_confidence > 0.5 and v_confidence > 0.5:
                 #     factor = 0
                 # if u_confidence < 0.2 or v_confidence <= 0.2:
@@ -514,7 +531,7 @@ class Tracker:
                 u_x, u_y, u_z = X[(3 * u):(3 * u + 3)]
                 v_x, v_y, v_z = X[(3 * v):(3 * v + 3)]
                 l_est = np.sqrt((u_x - v_x)**2 + (u_y - v_y)**2 + (u_z - v_z)**2)
-                l_gt = sensor_measurement[sensor_id]['length'] / 100
+                l_gt = sensor_measurement[sensor_id]['length'] / 1000
                 result[3*u : 3*u + 3] += 2*factor*(l_est - l_gt)*np.array([u_x - v_x, u_y - v_y, u_z - v_z]) / l_est
                 result[3*v : 3*v + 3] += 2*factor*(l_est - l_gt)*np.array([v_x - u_x, v_y - u_y, v_z - u_z]) / l_est
 
@@ -607,10 +624,14 @@ class Tracker:
             prev_rod_pose = np.eye(4)
 
         prev_rot = prev_rod_pose[:3, :3]
-        prev_z_dir = np.copy(prev_rot[:, 2])
+        prev_z_dir = prev_rot[:, 2]
 
-        # https://math.stackexchange.com/questions/180418/
-        delta_rot = perception_utils.np_rotmat_of_two_v(v1=prev_z_dir, v2=curr_z_dir)
+        delta_rot = np.eye(3)
+        cos_dist = prev_z_dir @ curr_z_dir
+        if not np.allclose(cos_dist, 1):
+            axis = np.cross(prev_z_dir, curr_z_dir)
+            angle = np.arccos(cos_dist)
+            delta_rot = Quaternion(axis=axis, angle=angle).rotation_matrix
 
         curr_rod_pose = np.eye(4)
         curr_rod_pose[:3, :3] = delta_rot @ prev_rot
@@ -620,22 +641,27 @@ class Tracker:
 
     def projective_icp_cuda(self, obs_pts: torch.Tensor, rendered_pts: torch.Tensor,
                             init_pose: np.ndarray, max_distance=0.02, verbose=False):
+        # ICP ref: https://www.youtube.com/watch?v=djnd502836w&t=781s
         # nearest neighbor data association
         distances = torch.norm(obs_pts.unsqueeze(1) - rendered_pts.unsqueeze(0), dim=2)  # (N, M)
-        closest_distance, closest_indices = torch.min(distances, dim=1)
+        closest_distance, closest_indices = torch.min(distances, dim=1)  # find corresponded rendered pts for obs pts
         dist_mask = closest_distance < max_distance
-
-        # ICP ref: https://www.youtube.com/watch?v=djnd502836w&t=781s
         Q = obs_pts[dist_mask].T  # (3, K)
         P = rendered_pts[closest_indices][dist_mask].T  # (3, K)
+        W = (1 - (closest_distance[dist_mask] / max_distance)**2)**2
+        # W = 1 - closest_distance[dist_mask] / max_distance
+
         Q = Q.to(torch.float64)  # !!!
         P = P.to(torch.float64)  # !!!
 
         P_mean = P.mean(1, keepdims=True)  # (3, 1)
         Q_mean = Q.mean(1, keepdims=True)  # (3, 1)
 
-        H = (Q - Q_mean) @ (P - P_mean).T
+        # https://github.com/scipy/scipy/blob/main/scipy/spatial/transform/_rotation.pyx#L2367
+        # Replace H = (Q - Q_mean) @ (P - P_mean).T with a potentially faster Einstein Summation
+        H = torch.einsum('ji,jk->ik', W[:, None] * (Q - Q_mean).T, (P - P_mean).T)
         U, D, V = torch.svd(H.cpu())  # SVD on CPU is 100x faster than on GPU
+
         # ensure that R is in the right-hand coordinate system, very important!!!
         # https://en.wikipedia.org/wiki/Kabsch_algorithm
         d = torch.sign(torch.det(U @ V.T))
@@ -654,7 +680,7 @@ class Tracker:
         delta_T = np.eye(4, dtype=np.float64)
         delta_T[:3, :3] = R.cpu().numpy()
         delta_T[:3, 3:4] = t.cpu().numpy()
-        return delta_T @ init_pose
+        return delta_T @ init_pose, Q.T, (R.cuda() @ P + t).T
 
 
     # https://math.stackexchange.com/questions/1993953/closest-points-between-two-lines
@@ -729,15 +755,12 @@ class Tracker:
 if __name__ == '__main__':
     parser = ArgumentParser()
     parser.add_argument("--dataset", default="dataset")
-    # parser.add_argument("--video_id", default="nocon5")
-    # parser.add_argument("--video_id", default="crawling_trial5")
-    parser.add_argument("--video_id", default="socks6")
-    # parser.add_argument("--video_id", default="dummy")
-    parser.add_argument("--rod_mesh_file", default="pcd/yale/untethered_rod_w_end_cap.ply")
-    # parser.add_argument("--rod_mesh_file", default="pcd/yale/end_cap_only_new.obj")
-    parser.add_argument("--top_end_cap_mesh_file", default="pcd/yale/end_cap_top.obj")
-    parser.add_argument("--bottom_end_cap_mesh_file", default="pcd/yale/end_cap_bottom.obj")
-    parser.add_argument("--first_frame_id", default=50, type=int)
+    parser.add_argument("--video_id", default="monday_roll15")
+    # parser.add_argument("--video_id", default="socks6")
+    parser.add_argument("--rod_mesh_file", default="pcd/yale/struct_with_socks_new.ply")
+    parser.add_argument("--top_end_cap_mesh_file", default="pcd/yale/end_cap_top_new.obj")
+    parser.add_argument("--bottom_end_cap_mesh_file", default="pcd/yale/end_cap_bottom_new.obj")
+    parser.add_argument("--first_frame_id", default=0, type=int)
     parser.add_argument("--max_iter", default=3, type=int)
     parser.add_argument("-v", "--visualize", default=False, action="store_true")
     args = parser.parse_args()
@@ -753,15 +776,10 @@ if __name__ == '__main__':
     assert os.path.isfile(args.rod_mesh_file), "rod geometry is not found!"
     rod_mesh_o3d = o3d.io.read_triangle_mesh(args.rod_mesh_file)
     rod_pcd = rod_mesh_o3d.sample_points_poisson_disk(1000)
-    points = np.asarray(rod_pcd.points)
-    offset = points.mean(0)
-    points -= offset  # move point cloud center
-    points /= data_cfg['rod_scale']  # scale points from millimeter to meter
+    top_end_cap_mesh = o3d.io.read_triangle_mesh(args.top_end_cap_mesh_file)
 
     # read rod and end cap trimesh for for rendering
     rod_fuze_mesh = trimesh.load_mesh(args.rod_mesh_file)
-    rod_fuze_mesh.apply_translation(-offset)
-    rod_fuze_mesh.apply_scale(1 / data_cfg['rod_scale'])
     rod_mesh = pyrender.Mesh.from_trimesh(rod_fuze_mesh)
     top_end_cap_mesh = pyrender.Mesh.from_trimesh(trimesh.load_mesh(args.top_end_cap_mesh_file))
     bottom_end_cap_mesh = pyrender.Mesh.from_trimesh(trimesh.load_mesh(args.bottom_end_cap_mesh_file))
@@ -804,11 +822,13 @@ if __name__ == '__main__':
         cv2.imshow("estimation", cv2.cvtColor(vis_im, cv2.COLOR_RGB2BGR))
         key = cv2.waitKey(0)
 
+    data = dict()
     for idx in tqdm(range(args.first_frame_id + 1, len(prefixes))):
         prefix = prefixes[idx]
         color_path = os.path.join(video_path, 'color', f'{prefix}.png')
         depth_path = os.path.join(video_path, 'depth', f'{prefix}.png')
         info_path = os.path.join(video_path, 'data', f'{prefix}.json')
+        data[prefix] = dict()
 
         # color_im = cv2.imread(color_path)
         color_im = cv2.cvtColor(cv2.imread(color_path), cv2.COLOR_BGR2RGB)
@@ -821,10 +841,20 @@ if __name__ == '__main__':
         # info['sensor_status']['7'] = False
         # info['sensor_status']['8'] = False
 
+        data[prefix]['color_im'] = color_im
+        data[prefix]['depth_im'] = depth_im
+        data[prefix]['info'] = info
+
+    for idx in tqdm(range(args.first_frame_id + 1, len(prefixes))):
+        prefix = prefixes[idx]
+        color_im = data[prefix]['color_im']
+        depth_im = data[prefix]['depth_im']
+        info = data[prefix]['info']
+
         tic = time.time()
         tracker.update(color_im, depth_im, info, args.max_iter)
         # print(f"update takes: {time.time() - tic}s")
-        # os.makedirs(os.path.join(video_path, 'estimation_rod_only'), exist_ok=True)
+        os.makedirs(os.path.join(video_path, 'estimation_rod_only'), exist_ok=True)
 
         if args.visualize:
             rendered_seg, rendered_depth = tracker.render_current_state()
