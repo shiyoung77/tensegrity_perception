@@ -257,8 +257,8 @@ class Tracker:
         hsv_mask = cv2.inRange(color_im_hsv,
                             lowerb=tuple(self.data_cfg['hsv_ranges'][color][0]),
                             upperb=tuple(self.data_cfg['hsv_ranges'][color][1])).astype(np.bool8)
-        # if color == 'red':
-        #     hsv_mask |= cv2.inRange(color_im_hsv, lowerb=(0, 80, 50), upperb=(15, 255, 255)).astype(np.bool8)
+        if color == 'red':
+            hsv_mask |= cv2.inRange(color_im_hsv, lowerb=(0, 80, 50), upperb=(15, 255, 255)).astype(np.bool8)
         return hsv_mask
 
 
@@ -274,6 +274,36 @@ class Tracker:
         return obs_pts
 
 
+    def filter_obs_pts(self, obs_pts, color, radius=0.1, thresh=0.01):
+        if obs_pts.shape[0] < 10:
+            return obs_pts
+
+        dist_dict = dict()
+        u, v = self.data_cfg['color_to_rod'][color]
+        for node in (u, v):
+            pos = torch.from_numpy(self.G.nodes[node]['pos_list'][-1]).cuda()
+            dist = torch.norm(obs_pts - pos, dim=1)
+            dist_dict[node] = dist
+
+        u_pts = obs_pts[(dist_dict[u] < dist_dict[v]) & (dist_dict[u] < radius)]
+        v_pts = obs_pts[(dist_dict[v] < dist_dict[u]) & (dist_dict[v] < radius)]
+
+        # filter points based on depth
+        N = u_pts.shape[0]
+        if N > 0:
+            zs = u_pts[:, 2]
+            z_min = torch.sort(zs[zs > 0]).values[int(N * 0.3)]
+            u_pts = u_pts[zs < z_min + thresh]
+
+        N = v_pts.shape[0]
+        if N > 0:
+            zs = v_pts[:, 2]
+            z_min = torch.sort(zs[zs > 0]).values[int(N * 0.3)]
+            v_pts = v_pts[zs < z_min + thresh]
+
+        return u_pts, v_pts
+
+
     def update(self, color_im, depth_im, info, max_iter=3):
         assert self.initialized, "[Error] You must first initialize the tracker!"
 
@@ -287,13 +317,29 @@ class Tracker:
             hsv_mask = self.compute_hsv_mask(color_im, color)
             obs_pts = self.compute_obs_pts(depth_im_gpu, hsv_mask)
 
-            # add fake points at the prev end cap position
-            fake_pts = np.stack([self.G.nodes[u]['pos_list'][-1], self.G.nodes[v]['pos_list'][-1]])
-            fake_pts = torch.from_numpy(fake_pts).to(torch.float32).cuda()
-            fake_pts = torch.tile(fake_pts, (50, 1))
+            # # add fake points at the prev end cap position
+            # fake_pts = np.stack([self.G.nodes[u]['pos_list'][-1], self.G.nodes[v]['pos_list'][-1]])
+            # fake_pts = torch.from_numpy(fake_pts).to(torch.float32).cuda()
+            # fake_pts = torch.tile(fake_pts, (50, 1))
+            # obs_pts = torch.vstack([obs_pts, fake_pts])
 
-            augmented_obs_pts = torch.vstack([obs_pts, fake_pts])
-            obs_pts_dict[color] = augmented_obs_pts
+            u_obs_pts, v_obs_pts = self.filter_obs_pts(obs_pts, color, radius=0.12, thresh=0.025)
+            obs_pts = torch.vstack([u_obs_pts, v_obs_pts])
+
+            # add fake points at the prev end cap position
+            if u_obs_pts.shape[0] < 10:
+                fake_pts = self.G.nodes[u]['pos_list'][-1]
+                fake_pts = torch.from_numpy(fake_pts).to(torch.float32).cuda()
+                fake_pts = torch.tile(fake_pts, (10, 1))
+                obs_pts = torch.vstack([obs_pts, fake_pts])
+
+            if v_obs_pts.shape[0] < 10:
+                fake_pts = self.G.nodes[v]['pos_list'][-1]
+                fake_pts = torch.from_numpy(fake_pts).to(torch.float32).cuda()
+                fake_pts = torch.tile(fake_pts, (10, 1))
+                obs_pts = torch.vstack([obs_pts, fake_pts])
+
+            obs_pts_dict[color] = obs_pts
         # print(f"color filter takes: {time.time() - tic}s")
 
         for iter in range(max_iter):
@@ -327,7 +373,8 @@ class Tracker:
 
                 obs_pts = obs_pts_dict[color]
                 prev_pose = self.G.edges[u, v]['pose_list'][-1].copy()
-                rod_pose, Q, P = self.projective_icp_cuda(obs_pts, rendered_pts, prev_pose, max_distance=0.1, verbose=False)
+                # rod_pose, Q, P = self.projective_icp_cuda(obs_pts, rendered_pts, prev_pose, max_distance=0.1)
+                rod_pose, Q, P = self.projective_icp_cuda(obs_pts, rendered_pts, prev_pose, max_distance=0.1 / (iter + 1))
 
                 if iter == 0:
                     self.G.edges[u, v]['pose_list'].append(rod_pose)
@@ -501,7 +548,7 @@ class Tracker:
                 u_pos = X[(3 * u):(3 * u + 3)]
                 v_pos = X[(3 * v):(3 * v + 3)]
                 estimated_length = la.norm(u_pos - v_pos)
-                measured_length = sensor_measurement[sensor_id]['length'] / 1000
+                measured_length = sensor_measurement[sensor_id]['length'] / self.data_cfg['cable_length_scale']
                 binary_loss += factor * (estimated_length - measured_length)**2
 
             return unary_loss + binary_loss
@@ -531,7 +578,7 @@ class Tracker:
                 u_x, u_y, u_z = X[(3 * u):(3 * u + 3)]
                 v_x, v_y, v_z = X[(3 * v):(3 * v + 3)]
                 l_est = np.sqrt((u_x - v_x)**2 + (u_y - v_y)**2 + (u_z - v_z)**2)
-                l_gt = sensor_measurement[sensor_id]['length'] / 1000
+                l_gt = sensor_measurement[sensor_id]['length'] / self.data_cfg['cable_length_scale']
                 result[3*u : 3*u + 3] += 2*factor*(l_est - l_gt)*np.array([u_x - v_x, u_y - v_y, u_z - v_z]) / l_est
                 result[3*v : 3*v + 3] += 2*factor*(l_est - l_gt)*np.array([v_x - u_x, v_y - u_y, v_z - u_z]) / l_est
 
@@ -658,8 +705,8 @@ class Tracker:
         Q_mean = Q.mean(1, keepdims=True)  # (3, 1)
 
         # https://github.com/scipy/scipy/blob/main/scipy/spatial/transform/_rotation.pyx#L2367
-        # Replace H = (Q - Q_mean) @ (P - P_mean).T with a potentially faster Einstein Summation
         H = torch.einsum('ji,jk->ik', W[:, None] * (Q - Q_mean).T, (P - P_mean).T)
+        # H = (Q - Q_mean) @ (P - P_mean).T
         U, D, V = torch.svd(H.cpu())  # SVD on CPU is 100x faster than on GPU
 
         # ensure that R is in the right-hand coordinate system, very important!!!
