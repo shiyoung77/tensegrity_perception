@@ -8,7 +8,6 @@ from argparse import ArgumentParser
 from collections import defaultdict
 
 import numpy as np
-import scipy.linalg as la
 import scipy.spatial.distance as distance
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -36,47 +35,14 @@ if __name__ == '__main__':
     num_rods = len(data_cfg['color_to_rod'])
     N = positions[0].shape[0]  # number of estimated frames
 
-    ########################################################################################
-    # Compute transformation from camera frame to motion capture frame
-    # WARNING: This is not the ideal way to do it. The estiamted transformation may contain error.
-    Q = []
-    P = []
-    for i in range(N):
-        info_path = os.path.join(args.dataset, args.video, 'data', f"{i + args.start_frame:04d}.json")
-        with open(info_path, 'r') as f:
-            info = json.load(f)
-
-        for u in range(args.num_endcaps):
-            pos_mc = info['mocap'][str(u)]
-            if pos_mc is None:
-                continue
-            else:
-                x = pos_mc['x'] / args.mocap_scale  # (mm) -> m
-                y = pos_mc['y'] / args.mocap_scale
-                z = pos_mc['z'] / args.mocap_scale
-                pos_mc = np.array([x, y, z])
-
-            pos_est = positions[u][i]  # (3,)
-
-            Q.append(pos_mc)
-            P.append(pos_est)
-
-    Q = np.array(Q).T  # (3, num_endcaps * N)
-    P = np.array(P).T  # (3, num_endcaps * N)
-
-    P_mean = P.mean(1, keepdims=True)  # (3, 1)
-    Q_mean = Q.mean(1, keepdims=True)  # (3, 1)
-
-    H = (Q - Q_mean) @ (P - P_mean).T
-    U, D, V_T = la.svd(H)
-    R = U @ V_T
-    t = Q_mean - R @ P_mean
-
-    T = np.eye(4)
-    T[:3, :3] = R
-    T[:3, 3:4] = t
-    print("Estiamted transformation from camera frame to motion capture frame:")
-    print(T)
+    # load transformation from camera to motion capture
+    cam_to_mocap_filepath = os.path.join(args.dataset, args.video, "cam_to_mocap.npy")
+    if not os.path.exists(cam_to_mocap_filepath):
+        print("[WARNING] Transformation not found. Start estimating... It may not be accurate.")
+        os.system("python compute_T_from_cam_to_mocap.py")
+    T = np.load(cam_to_mocap_filepath)
+    R = T[:3, :3]
+    t = T[:3, 3:4]
 
     ########################################################################################
     # compute rod pose error and endcap position error for each frame
@@ -129,7 +95,7 @@ if __name__ == '__main__':
             motion_capture_fail = np.allclose(Q[:, u], 0)
             if not motion_capture_fail:
                 endcap_error_data['frame_id'].append(i)
-                endcap_error_data['error'].append(distance.euclidean(Q[:, u], P_hat[:, u]))
+                endcap_error_data['error(m)'].append(distance.euclidean(Q[:, u], P_hat[:, u]))
                 endcap_error_data['endcap_id'].append(u)
 
     rod_error_df = pd.DataFrame(data=rod_error_data)
@@ -138,17 +104,21 @@ if __name__ == '__main__':
     ########################################################################################
     # rod pose error visualization
     fig, axes = plt.subplots(2, 2)
+    fig.set_size_inches(18, 10)
     axes[0, 0].grid(True)
     axes[0, 1].grid(True)
     sns.scatterplot(ax=axes[0, 0], x="frame_id", y="trans_err(m)", hue="color", data=rod_error_df)
     sns.scatterplot(ax=axes[0, 1], x="frame_id", y="rot_err(deg)", hue="color", data=rod_error_df)
     sns.boxplot(ax=axes[1, 0], x="color", y="trans_err(m)", data=rod_error_df)
     sns.boxplot(ax=axes[1, 1], x="color", y="rot_err(deg)", data=rod_error_df)
-    plt.show()
+    plt.savefig(os.path.join(args.dataset, args.video, "rod_pose_error.png"))
 
     # rod pose error visualization
     fig, axes = plt.subplots(1, 2)
-    axes[0].grid=True
-    sns.scatterplot(ax=axes[0], x="frame_id", y="error", hue="endcap_id", data=endcap_error_df, palette="deep")
-    sns.barplot(ax=axes[1], x="endcap_id", y="error", data=endcap_error_df, palette="deep")
+    fig.set_size_inches(18, 10)
+    axes[0].grid(True)
+    sns.scatterplot(ax=axes[0], x="frame_id", y="error(m)", hue="endcap_id", data=endcap_error_df, palette="deep")
+    sns.barplot(ax=axes[1], x="endcap_id", y="error(m)", data=endcap_error_df, palette="deep")
+    plt.savefig(os.path.join(args.dataset, args.video, "endcap_position_error.png"))
+
     plt.show()
