@@ -1,184 +1,154 @@
-"""
-estimate the transoformation between the camera coordinates and motion capture coordinates
-"""
+# Anaconda recommended
+# python >= 3.6 required
 
 import os
 import importlib
 import json
-import torch
+from argparse import ArgumentParser
+from collections import defaultdict
+
 import numpy as np
 import scipy.linalg as la
+import scipy.spatial.distance as distance
+import pandas as pd
 import matplotlib.pyplot as plt
+import seaborn as sns
 
 
-dataset = 'dataset'
-# video_id = 'socks6'
-video_id = 'monday_roll15'
-pose_folder = os.path.join(dataset, video_id, 'poses')
+if __name__ == '__main__':
+    parser = ArgumentParser("pose evalutation")
+    parser.add_argument("--dataset", default="dataset")
+    parser.add_argument("-v", "--video", default="monday_roll15")
+    parser.add_argument("--start_frame", default=0, type=int)
+    parser.add_argument("--num_endcaps", default=6, type=int)
+    parser.add_argument("--mocap_scale", default=1000, type=int, help="scale of measured position (mm by default)")
+    args = parser.parse_args()
 
-# read data config
-data_cfg_module = importlib.import_module(f'{dataset}.{video_id}.config')
-data_cfg = data_cfg_module.get_config(read_cfg=True)
+    # read data config
+    data_cfg_module = importlib.import_module(f'{args.dataset}.{args.video}.config')
+    data_cfg = data_cfg_module.get_config(read_cfg=True)
 
-positions = dict()
-for i in range(6):
-    positions[i] = np.load(os.path.join(pose_folder, f'{i}_pos.npy'))
+    pose_folder = os.path.join(args.dataset, args.video, 'poses')
+    positions = dict()
+    for i in range(args.num_endcaps):
+        positions[i] = np.load(os.path.join(pose_folder, f'{i}_pos.npy'))
 
-# pts_est = np.zeros((6, 3))
-# for i in range(6):
-#     pts_est[i] = positions[i][0]
+    num_rods = len(data_cfg['color_to_rod'])
+    N = positions[0].shape[0]  # number of estimated frames
 
-start_frame_id = 0
-# pts_mc = np.zeros((6, 3))
-# with open(os.path.join(dataset, video_id, 'data', f"{start_frame_id:04d}.json"), 'r') as f:
-#     info = json.load(f)
-# for i in range(6):
-#     x = info['mocap'][str(i)]['x'] / 1000
-#     y = info['mocap'][str(i)]['y'] / 1000
-#     z = info['mocap'][str(i)]['z'] / 1000
-#     pts_mc[i] = [x, y, z]
+    ########################################################################################
+    # Compute transformation from camera frame to motion capture frame
+    # WARNING: This is not the ideal way to do it. The estiamted transformation may contain error.
+    Q = []
+    P = []
+    for i in range(N):
+        info_path = os.path.join(args.dataset, args.video, 'data', f"{i + args.start_frame:04d}.json")
+        with open(info_path, 'r') as f:
+            info = json.load(f)
 
-# Q = torch.from_numpy(pts_mc).T
-# P = torch.from_numpy(pts_est).T
-# P_mean = P.mean(1, keepdims=True)  # (3, 1)
-# Q_mean = Q.mean(1, keepdims=True)  # (3, 1)
+        for u in range(args.num_endcaps):
+            pos_mc = info['mocap'][str(u)]
+            if pos_mc is None:
+                continue
+            else:
+                x = pos_mc['x'] / args.mocap_scale  # (mm) -> m
+                y = pos_mc['y'] / args.mocap_scale
+                z = pos_mc['z'] / args.mocap_scale
+                pos_mc = np.array([x, y, z])
 
-# H = (Q - Q_mean) @ (P - P_mean).T
-# U, D, V = torch.svd(H)
-# R = U @ V.T
-# t = Q_mean - R @ P_mean
+            pos_est = positions[u][i]  # (3,)
 
-# T = np.eye(4)
-# T[:3, :3] = R
-# T[:3, 3:4] = t
+            Q.append(pos_mc)
+            P.append(pos_est)
 
-# P_hat = R @ P + t
+    Q = np.array(Q).T  # (3, num_endcaps * N)
+    P = np.array(P).T  # (3, num_endcaps * N)
 
-# error = 0
-# for color, (u, v) in data_cfg['color_to_rod'].items():
-#     rod_error = torch.norm((P_hat[:, u] + P_hat[:, v]) / 2 - (Q[:, u] + Q[:, v]) / 2)
-#     print(rod_error)
-#     error += rod_error
-# error /= 3
-# print(error)
+    P_mean = P.mean(1, keepdims=True)  # (3, 1)
+    Q_mean = Q.mean(1, keepdims=True)  # (3, 1)
 
+    H = (Q - Q_mean) @ (P - P_mean).T
+    U, D, V_T = la.svd(H)
+    R = U @ V_T
+    t = Q_mean - R @ P_mean
 
-Q = []
-P = []
+    T = np.eye(4)
+    T[:3, :3] = R
+    T[:3, 3:4] = t
+    print("Estiamted transformation from camera frame to motion capture frame:")
+    print(T)
 
-for i in range(10):
-    with open(os.path.join(dataset, video_id, 'data', f"{i + start_frame_id:04d}.json"), 'r') as f:
-        info = json.load(f)
+    ########################################################################################
+    # compute rod pose error and endcap position error for each frame
+    rod_error_data = defaultdict(list)
+    endcap_error_data = defaultdict(list)
 
-    for j in range(6):
-        pos_mc = info['mocap'][str(j)]
-        if pos_mc is None:
-            continue
-        else:
-            x = pos_mc['x'] / 1000
-            y = pos_mc['y'] / 1000
-            z = pos_mc['z'] / 1000
-            pos_mc = np.array([x, y, z])
+    for i in range(N):  # for each frame
+        pts_est = np.zeros((args.num_endcaps, 3))
+        for u in range(args.num_endcaps):
+            pts_est[u] = positions[u][i]
 
-        pos_est = positions[j][i]  # (3,)
+        pts_mc = np.zeros((args.num_endcaps, 3))
+        with open(os.path.join(args.dataset, args.video, 'data', f"{i + args.start_frame:04d}.json"), 'r') as f:
+            info = json.load(f)
+        for u in range(args.num_endcaps):
+            pos = info['mocap'][str(u)]
+            if pos is None:
+                pts_mc[u] = [0, 0, 0]
+            else:
+                x = pos['x'] / args.mocap_scale  # (mm) -> (m)
+                y = pos['y'] / args.mocap_scale
+                z = pos['z'] / args.mocap_scale
+                pts_mc[u] = [x, y, z]
 
-        Q.append(pos_mc)
-        P.append(pos_est)
+        Q = pts_mc.T  # (3, num_endcaps)
+        P = pts_est.T  # (3, num_endcaps)
+        P_hat = R @ P + t  # (3, num_endcaps)
 
-Q = np.array(Q).T
-P = np.array(P).T
-Q = torch.from_numpy(Q)
-P = torch.from_numpy(P)
-P_mean = P.mean(1, keepdims=True)  # (3, 1)
-Q_mean = Q.mean(1, keepdims=True)  # (3, 1)
+        # compute rod pose error
+        for color, (u, v) in data_cfg['color_to_rod'].items():
+            motion_capture_fail = np.allclose(Q[:, u], 0) or np.allclose(Q[:, v], 0)
+            if not motion_capture_fail:
+                rod_error_data['color'].append(color)
+                rod_error_data['frame_id'].append(i)
 
-H = (Q - Q_mean) @ (P - P_mean).T
-U, D, V = torch.svd(H)
-R = U @ V.T
-t = Q_mean - R @ P_mean
+                # translation error
+                a = (P_hat[:, u] + P_hat[:, v]) / 2
+                b = (Q[:, u] + Q[:, v]) / 2
+                trans_err = distance.euclidean(a, b)
+                rod_error_data['trans_err(m)'].append(trans_err)
 
-P_hat = R @ P + t
-error = 0
-for color, (u, v) in data_cfg['color_to_rod'].items():
-    rod_error = torch.norm((P_hat[:, u] + P_hat[:, v]) / 2 - (Q[:, u] + Q[:, v]) / 2)
-    error += rod_error
-error /= 3
-print(error)
+                # rotation error
+                a = P_hat[:, u] - P_hat[:, v]
+                b = Q[:, u] - Q[:, v]
+                rot_err = np.rad2deg(np.arccos(1 - distance.cosine(a, b)))
+                rod_error_data['rot_err(deg)'].append(rot_err)
 
-R = torch.tensor([[-0.7530,  0.6580,  0.0088],
-            [-0.0320, -0.0500,  0.9982],
-            [ 0.6572,  0.7514,  0.0587]], dtype=torch.float64)
-t = torch.tensor([[-0.5749],
-            [ 1.2045],
-            [ 0.1435]], dtype=torch.float64)
+        # compute endcap position error
+        for u in range(args.num_endcaps):
+            motion_capture_fail = np.allclose(Q[:, u], 0)
+            if not motion_capture_fail:
+                endcap_error_data['frame_id'].append(i)
+                endcap_error_data['error'].append(distance.euclidean(Q[:, u], P_hat[:, u]))
+                endcap_error_data['endcap_id'].append(u)
 
-print("rotation matrix")
-print(R)
-print("translation")
-print(t)
+    rod_error_df = pd.DataFrame(data=rod_error_data)
+    endcap_error_df = pd.DataFrame(data=endcap_error_data)
 
-########################################################################################
-errors = {color: [] for color in data_cfg['color_to_rod']}
-for i in range(111):
-    pts_est = np.zeros((6, 3))
-    for j in range(6):
-        pts_est[j] = positions[j][i]
+    ########################################################################################
+    # rod pose error visualization
+    fig, axes = plt.subplots(2, 2)
+    axes[0, 0].grid(True)
+    axes[0, 1].grid(True)
+    sns.scatterplot(ax=axes[0, 0], x="frame_id", y="trans_err(m)", hue="color", data=rod_error_df)
+    sns.scatterplot(ax=axes[0, 1], x="frame_id", y="rot_err(deg)", hue="color", data=rod_error_df)
+    sns.boxplot(ax=axes[1, 0], x="color", y="trans_err(m)", data=rod_error_df)
+    sns.boxplot(ax=axes[1, 1], x="color", y="rot_err(deg)", data=rod_error_df)
+    plt.show()
 
-    pts_mc = np.zeros((6, 3))
-    with open(os.path.join(dataset, video_id, 'data', f"{i + start_frame_id:04d}.json"), 'r') as f:
-        info = json.load(f)
-    for j in range(6):
-        pos = info['mocap'][str(j)]
-        if pos is None:
-            pts_mc[j] = [0, 0, 0]
-        else:
-            x = pos['x'] / 1000
-            y = pos['y'] / 1000
-            z = pos['z'] / 1000
-            pts_mc[j] = [x, y, z]
-
-    Q = pts_mc.T
-    P = pts_est.T
-    P_hat = R @ P + t
-
-    for j, [color, (u, v)] in enumerate(data_cfg['color_to_rod'].items()):
-        if np.all(Q[:, u] == 0) or np.all(Q[:, v] == 0):
-            errors[color].append(0)
-        else:
-            rod_error = la.norm((P_hat[:, u] + P_hat[:, v]) / 2 - (Q[:, u] + Q[:, v]) / 2)
-            # a = P_hat[:, u] - P_hat[:, v]
-            # a /= la.norm(a)
-            # b = Q[:, u] - Q[:, v]
-            # b /= la.norm(b)
-            # rod_error = 180 * np.arccos(a @ b) / np.pi
-            errors[color].append(rod_error)
-
-avg_error = 0
-count = 0
-valid_errors = []
-for color, error in errors.items():
-    error = np.array(error)
-    count += np.sum(error != 0)
-    avg_error += np.sum(error[error != 0])
-    valid_errors.append(error[error != 0])
-
-print(f"{count = }")
-# print(avg_error / count)
-valid_errors = np.hstack(valid_errors)
-print(valid_errors.mean())
-print(np.sqrt(valid_errors.var()))
-
-N = 111
-
-# plt.scatter(np.arange(210) + start_frame_id, errors['red'], label='red', c=np.array([[1, 0, 0]]))
-# plt.scatter(np.arange(210) + start_frame_id, errors['blue'], label='blue', c=np.array([[0, 0, 1]]))
-# plt.scatter(np.arange(210) + start_frame_id, errors['green'], label='green', c=np.array([[0, 1, 0]]))
-plt.scatter(np.arange(N), errors['red'], label='red', c=np.array([[1, 0, 0]]))
-plt.scatter(np.arange(N), errors['blue'], label='blue', c=np.array([[0, 0, 1]]))
-plt.scatter(np.arange(N), errors['green'], label='green', c=np.array([[0, 1, 0]]))
-plt.xlabel("frame id")
-plt.ylabel("rotation error (deg)")
-plt.grid(True)
-plt.title("Rotation Error")
-plt.legend(title='rod end cap color')
-plt.show()
+    # rod pose error visualization
+    fig, axes = plt.subplots(1, 2)
+    axes[0].grid=True
+    sns.scatterplot(ax=axes[0], x="frame_id", y="error", hue="endcap_id", data=endcap_error_df, palette="deep")
+    sns.barplot(ax=axes[1], x="endcap_id", y="error", data=endcap_error_df, palette="deep")
+    plt.show()
