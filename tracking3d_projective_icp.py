@@ -88,7 +88,7 @@ class Tracker:
         scene_pcd = perception_utils.create_pcd(depth_im, self.data_cfg['cam_intr'], color_im,
                                                 depth_trunc=self.data_cfg['depth_trunc'])
         if 'cam_extr' not in self.data_cfg:
-            plane_frame, _ = perception_utils.plane_detection_ransac(scene_pcd, inlier_thresh=0.005,
+            plane_frame, _ = perception_utils.plane_detection_ransac(scene_pcd, inlier_thresh=0.002,
                                                                      visualize=visualize)
             self.data_cfg['cam_extr'] = np.round(plane_frame, decimals=3)
 
@@ -485,6 +485,24 @@ class Tracker:
             constraint['fun'], constraint['jac'] = self.endcap_constraint_generator(u, v, rod_length)
             constraints.append(constraint)
 
+        # Add constraints between the lowest node and the ground (assuming quasi-static)
+        cam_to_world = la.inv(self.data_cfg['cam_extr'])
+        R = cam_to_world[:3, :3]
+        t = cam_to_world[:3, 3]
+        for _, (u, v) in self.data_cfg['color_to_rod'].items():
+            u_prev_pos = self.G.nodes[u]['pos_list'][-1]
+            v_prev_pos = self.G.nodes[v]['pos_list'][-1]
+            u_prev_world_pos = R @ u_prev_pos + t
+            v_prev_world_pos = R @ v_prev_pos + t
+            u_z = u_prev_world_pos[2]
+            v_z = v_prev_world_pos[2]
+            ground_node = u if u_z < v_z else v
+
+            constraint = dict()
+            constraint['type'] = 'eq'
+            constraint['fun'] = self.ground_constraint_generator(ground_node, rod_diameter=0.03)
+            # constraints.append(constraint)  # comment this if doesn't work
+
         rods = list(self.data_cfg['color_to_rod'].values())
         for i, (u, v) in enumerate(rods):
             p1 = self.G.nodes[u]['pos_list'][-1]
@@ -519,6 +537,20 @@ class Tracker:
             curr_end_cap_centers = np.vstack([u_pos, v_pos])
             optimized_pose = self.estimate_rod_pose_from_end_cap_centers(curr_end_cap_centers, prev_rod_pose)
             self.G.edges[u, v]['pose_list'][-1] = optimized_pose
+
+
+    def ground_constraint_generator(self, u, rod_diameter=0.03):
+        cam_to_world = la.inv(self.data_cfg['cam_extr'])
+        R = cam_to_world[:3, :3]
+        t = cam_to_world[:3, 3]
+
+        def constraint_function(X):
+            u_pos = X[3 * u: 3 * u + 3]
+            u_world_pos = R @ u_pos + t
+            u_z = u_world_pos[2]
+            return u_z - rod_diameter / 2
+
+        return constraint_function
 
 
     def objective_function_generator(self, sensor_measurement, sensor_status):
@@ -662,7 +694,8 @@ class Tracker:
             self.G.nodes[v]['pos_list'][-1] = finetuned_pose[:3, 3] - finetuned_pose[:3, 2] * self.rod_length / 2
 
 
-    def estimate_rod_pose_from_end_cap_centers(self, curr_end_cap_centers, prev_rod_pose=None):
+    @staticmethod
+    def estimate_rod_pose_from_end_cap_centers(curr_end_cap_centers, prev_rod_pose=None):
         curr_rod_pos = (curr_end_cap_centers[0] + curr_end_cap_centers[1]) / 2
         curr_z_dir = curr_end_cap_centers[0] - curr_end_cap_centers[1]
         curr_z_dir /= la.norm(curr_z_dir)
@@ -802,6 +835,7 @@ class Tracker:
 if __name__ == '__main__':
     parser = ArgumentParser()
     parser.add_argument("--dataset", default="dataset")
+    # parser.add_argument("--video_id", default="monday_roll1")
     parser.add_argument("--video_id", default="monday_roll15")
     # parser.add_argument("--video_id", default="socks6")
     parser.add_argument("--rod_mesh_file", default="pcd/yale/struct_with_socks_new.ply")
@@ -921,20 +955,27 @@ if __name__ == '__main__':
                 exit(0)
             cv2.imwrite(os.path.join(video_path, 'estimation_rod_only', f'{prefix}.png'), vis_im_bgr)
 
-            # scene_pcd = perception_utils.create_pcd(depth_im, data_cfg['cam_intr'], color_im,
-            #                                         depth_trunc=data_cfg['depth_trunc'])
-            # robot_cloud = o3d.geometry.PointCloud()
-            # for color, (u, v) in data_cfg['color_to_rod'].items():
-            #     rod_pcd = copy.deepcopy(tracker.rod_pcd)
-            #     rod_pcd = rod_pcd.paint_uniform_color(np.array(Tracker.ColorDict[color]) / 255)
-            #     rod_pose = copy.deepcopy(tracker.G.edges[u, v]['pose_list'][-1])
-            #     rod_pcd.transform(rod_pose)
-            #     robot_cloud += rod_pcd
+            scene_pcd = perception_utils.create_pcd(depth_im, data_cfg['cam_intr'], color_im,
+                                                    depth_trunc=data_cfg['depth_trunc'])
+            robot_cloud = o3d.geometry.PointCloud()
+            for color, (u, v) in data_cfg['color_to_rod'].items():
+                rod_pcd = copy.deepcopy(tracker.rod_pcd)
+                rod_pcd = rod_pcd.paint_uniform_color(np.array(Tracker.ColorDict[color]) / 255)
+                rod_pose = copy.deepcopy(tracker.G.edges[u, v]['pose_list'][-1])
+                rod_pcd.transform(rod_pose)
+                robot_cloud += rod_pcd
+
+            # mesh_box = o3d.geometry.TriangleMesh.create_box(width=1.0, height=1.0, depth=1.0)
+            # mesh_box.translate([0, 0, -1])
 
             # estimation_cloud = robot_cloud
-            # estimation_cloud = robot_cloud + scene_pcd
+            estimation_cloud = robot_cloud + scene_pcd
+
+            # estimation_cloud.transform(la.inv(tracker.data_cfg['cam_extr']))
+            # o3d.visualization.draw_geometries([estimation_cloud, mesh_box])
+
             # o3d.io.write_point_cloud(os.path.join(video_path, "scene_cloud", f"{idx:04d}.ply"), scene_pcd)
-            # o3d.io.write_point_cloud(os.path.join(video_path, "estimation_cloud", f"{idx:04d}.ply"), estimation_cloud)
+            o3d.io.write_point_cloud(os.path.join(video_path, "estimation_cloud", f"{idx:04d}.ply"), estimation_cloud)
 
     # save rod poses and end cap positions to file
     pose_output_folder = os.path.join(video_path, "poses")
