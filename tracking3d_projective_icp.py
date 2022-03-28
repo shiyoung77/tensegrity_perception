@@ -179,11 +179,17 @@ class Tracker:
 
                 # filter observable end cap point cloud by finding the largest cluster
                 end_cap_pcd = perception_utils.create_pcd(masked_depth_im, self.data_cfg['cam_intr'])
-                labels = np.asarray(end_cap_pcd.cluster_dbscan(eps=0.005, min_points=10, print_progress=False))
-                points_for_each_cluster = [(labels == label).sum() for label in range(labels.max() + 1)]
-                label = np.argmax(points_for_each_cluster)
-                masked_indices = np.where(labels == label)[0]
-                end_cap_pcd = end_cap_pcd.select_by_index(masked_indices)
+                u_pts = torch.from_numpy(np.asarray(end_cap_pcd.points))
+                zs = u_pts[:, 2]
+                z_min = torch.sort(zs[zs > 0]).values[int(u_pts.shape[0] * 0.3)]
+                u_pts = u_pts[zs < z_min + 0.01]
+                end_cap_pcd.points = o3d.utility.Vector3dVector(u_pts.numpy())
+
+                # labels = np.asarray(end_cap_pcd.cluster_dbscan(eps=0.005, min_points=10, print_progress=False))
+                # points_for_each_cluster = [(labels == label).sum() for label in range(labels.max() + 1)]
+                # label = np.argmax(points_for_each_cluster)
+                # masked_indices = np.where(labels == label)[0]
+                # end_cap_pcd = end_cap_pcd.select_by_index(masked_indices)
                 end_cap_center = np.asarray(end_cap_pcd.points).mean(axis=0)
                 end_cap_centers.append(end_cap_center)
 
@@ -835,8 +841,9 @@ class Tracker:
 if __name__ == '__main__':
     parser = ArgumentParser()
     parser.add_argument("--dataset", default="dataset")
-    # parser.add_argument("--video_id", default="monday_roll1")
-    parser.add_argument("--video_id", default="monday_roll15")
+    parser.add_argument("--video_id", default="monday_roll1")
+    # parser.add_argument("--video_id", default="monday_roll15")
+    # parser.add_argument("--video_id", default="shiyang11")
     # parser.add_argument("--video_id", default="socks6")
     parser.add_argument("--rod_mesh_file", default="pcd/yale/struct_with_socks_new.ply")
     parser.add_argument("--top_end_cap_mesh_file", default="pcd/yale/end_cap_top_new.obj")
