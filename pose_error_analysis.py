@@ -82,43 +82,50 @@ if __name__ == '__main__':
                 a = (P_hat[:, u] + P_hat[:, v]) / 2
                 b = (Q[:, u] + Q[:, v]) / 2
                 trans_err = distance.euclidean(a, b)
-                rod_error_data['trans_err(m)'].append(trans_err)
+                rod_error_data['trans_err (cm)'].append(trans_err * 100)
 
                 # rotation error
                 a = P_hat[:, u] - P_hat[:, v]
                 b = Q[:, u] - Q[:, v]
                 rot_err = np.rad2deg(np.arccos(1 - distance.cosine(a, b)))
-                rod_error_data['rot_err(deg)'].append(rot_err)
+                rod_error_data['rot_err (deg)'].append(rot_err)
 
         # compute endcap position error
         for u in range(args.num_endcaps):
             motion_capture_fail = np.allclose(Q[:, u], 0)
             if not motion_capture_fail:
                 endcap_error_data['frame_id'].append(i)
-                endcap_error_data['error(m)'].append(distance.euclidean(Q[:, u], P_hat[:, u]))
+                endcap_error_data['error (cm)'].append(distance.euclidean(Q[:, u], P_hat[:, u])*100)
                 endcap_error_data['endcap_id'].append(u)
 
     rod_error_df = pd.DataFrame(data=rod_error_data)
     endcap_error_df = pd.DataFrame(data=endcap_error_data)
 
     ########################################################################################
+    os.makedirs(os.path.join(args.dataset, args.video, "error_analysis"), exist_ok=True)
+
     # rod pose error visualization
     fig, axes = plt.subplots(2, 2)
-    fig.set_size_inches(18, 10)
+    fig.suptitle(f"Rod Pose Error Plot")
+    fig.set_size_inches(16, 12)
     axes[0, 0].grid(True)
     axes[0, 1].grid(True)
-    sns.scatterplot(ax=axes[0, 0], x="frame_id", y="trans_err(m)", hue="color", data=rod_error_df)
-    sns.scatterplot(ax=axes[0, 1], x="frame_id", y="rot_err(deg)", hue="color", data=rod_error_df)
-    sns.boxplot(ax=axes[1, 0], x="color", y="trans_err(m)", data=rod_error_df)
-    sns.boxplot(ax=axes[1, 1], x="color", y="rot_err(deg)", data=rod_error_df)
-    plt.savefig(os.path.join(args.dataset, args.video, "rod_pose_error.png"))
+    sns.scatterplot(ax=axes[0, 0], x="frame_id", y="trans_err (cm)", hue="color", data=rod_error_df)
+    sns.scatterplot(ax=axes[0, 1], x="frame_id", y="rot_err (deg)", hue="color", data=rod_error_df)
+    sns.barplot(ax=axes[1, 0], x="color", y="trans_err (cm)", data=rod_error_df)
+    sns.barplot(ax=axes[1, 1], x="color", y="rot_err (deg)", data=rod_error_df)
+    axes[0, 0].set_ylim(0)
+    axes[0, 1].set_ylim(0)
+    plt.savefig(os.path.join(args.dataset, args.video, "error_analysis", "rod_pose_error.png"), dpi=150)
 
     # rod pose error visualization
     fig, axes = plt.subplots(1, 2)
-    fig.set_size_inches(18, 10)
+    fig.suptitle(f"Endcap Position Error Plot")
+    fig.set_size_inches(10, 5)
     axes[0].grid(True)
-    sns.scatterplot(ax=axes[0], x="frame_id", y="error(m)", hue="endcap_id", data=endcap_error_df, palette="deep")
-    sns.barplot(ax=axes[1], x="endcap_id", y="error(m)", data=endcap_error_df, palette="deep")
-    plt.savefig(os.path.join(args.dataset, args.video, "endcap_position_error.png"))
+    sns.scatterplot(ax=axes[0], x="frame_id", y="error (cm)", hue="endcap_id", data=endcap_error_df, palette="deep")
+    sns.barplot(ax=axes[1], x="endcap_id", y="error (cm)", data=endcap_error_df, palette="deep")
+    axes[0].set_ylim(0)
+    plt.savefig(os.path.join(args.dataset, args.video, "error_analysis", "endcap_position_error.png"), dpi=150)
 
     plt.show()

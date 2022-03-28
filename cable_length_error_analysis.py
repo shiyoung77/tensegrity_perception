@@ -59,17 +59,25 @@ if __name__ == '__main__':
                 v_pos = np.array([v_pos['x'], v_pos['y'], v_pos['z']]) / args.mocap_scale
                 mocap_dist[sensor_id].append(la.norm(u_pos - v_pos))
 
-            predicted_errors[sensor_id].append(np.abs(mocap_dist[sensor_id][-1] - predicted_dist[sensor_id][-1])*1000)
-            measured_errors[sensor_id].append(np.abs(mocap_dist[sensor_id][-1] - measured_dist[sensor_id][-1])*1000)
+            predicted_errors[sensor_id].append(np.abs(mocap_dist[sensor_id][-1] - predicted_dist[sensor_id][-1])*100)
+            measured_errors[sensor_id].append(np.abs(mocap_dist[sensor_id][-1] - measured_dist[sensor_id][-1])*100)
+
+    os.makedirs(os.path.join(args.dataset, args.video, "error_analysis"), exist_ok=True)
 
     fig, axes = plt.subplots(3, 3)
+    fig.set_size_inches(16, 12)
+    fig.suptitle(f"Cable Length Plot")
     for sensor_id in data_cfg['sensor_to_tendon']:
         row = int(sensor_id) // 3
         col = int(sensor_id) % 3
-        axes[row, col].plot(range(N), predicted_dist[sensor_id], label=f'{sensor_id}-predicted')
-        axes[row, col].plot(range(N), measured_dist[sensor_id], label=f'{sensor_id}-measured')
-        axes[row, col].plot(range(N), mocap_dist[sensor_id], label=f'{sensor_id}-mocap')
+        axes[row, col].plot(range(N), np.array(predicted_dist[sensor_id])*100, label=f'{sensor_id}-predicted')
+        axes[row, col].plot(range(N), np.array(measured_dist[sensor_id])*100, label=f'{sensor_id}-measured')
+        axes[row, col].plot(range(N), np.array(mocap_dist[sensor_id])*100, label=f'{sensor_id}-mocap')
         axes[row, col].legend(loc='best')
+        axes[row, col].set_xlabel("frame id")
+        axes[row, col].set_ylabel("distance (cm)")
+    plt.subplots_adjust(hspace=0.5)
+    plt.savefig(os.path.join(args.dataset, args.video, "error_analysis", "cable_length.png"), dpi=150)
 
     predicted_errors_stacked = np.hstack(list(predicted_errors.values()))
     measured_errors_stacked = np.hstack(list(measured_errors.values()))
@@ -77,15 +85,25 @@ if __name__ == '__main__':
     measured_mean_err = np.nanmean(measured_errors_stacked)
 
     fig, axes = plt.subplots(3, 3)
-    fig.suptitle(f"Cable length error plot.\n{pred_mean_err = :.1f}mm, {measured_mean_err = :.1f}mm")
+    fig.set_size_inches(16, 12)
+    fig.suptitle(f"Cable Length Error Plot\n"
+                 f"mean predicted error of all cables (cm): {pred_mean_err:.1f}\n"
+                 f"mean measured error of all cables (cm) {measured_mean_err:.1f}")
     for sensor_id in data_cfg['sensor_to_tendon']:
         row = int(sensor_id) // 3
         col = int(sensor_id) % 3
         axes[row, col].set_xlabel("frame id")
-        axes[row, col].set_ylabel("error (mm)")
-        axes[row, col].plot(range(N), predicted_errors[sensor_id], label=f'{sensor_id}-predicted_err')
-        axes[row, col].plot(range(N), measured_errors[sensor_id], label=f'{sensor_id}-measured_err')
+        axes[row, col].set_ylabel("error (cm)")
+        axes[row, col].plot(range(N), predicted_errors[sensor_id], label=f'{sensor_id}-pred')
+        axes[row, col].plot(range(N), measured_errors[sensor_id], label=f'{sensor_id}-measured')
         axes[row, col].legend(loc='best')
-        axes[row, col].set_title(f"pred_err_mean(mm): {np.nanmean(predicted_errors[sensor_id]):.1f},  "
-                                 f"measured_err_mean(mm): {np.nanmean(measured_errors[sensor_id]):.1f}")
+        axes[row, col].set_title(f"mean predicted error (cm): {np.nanmean(predicted_errors[sensor_id]):.1f}\n"
+                                 f"mean measured error (cm): {np.nanmean(measured_errors[sensor_id]):.1f}",
+                                 fontsize=10)
+        axes[row, col].grid(True)
+        axes[row, col].set_ylim(0)
+    plt.subplots_adjust(hspace=0.5)
+    plt.savefig(os.path.join(args.dataset, args.video, "error_analysis", "cable_length_error.png"), dpi=150)
+
+
     plt.show()
