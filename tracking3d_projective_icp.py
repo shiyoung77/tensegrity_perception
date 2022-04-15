@@ -263,8 +263,8 @@ class Tracker:
         hsv_mask = cv2.inRange(color_im_hsv,
                             lowerb=tuple(self.data_cfg['hsv_ranges'][color][0]),
                             upperb=tuple(self.data_cfg['hsv_ranges'][color][1])).astype(np.bool8)
-        if color == 'red':
-            hsv_mask |= cv2.inRange(color_im_hsv, lowerb=(0, 80, 50), upperb=(15, 255, 255)).astype(np.bool8)
+        # if color == 'red':
+        #     hsv_mask |= cv2.inRange(color_im_hsv, lowerb=(0, 80, 50), upperb=(15, 255, 255)).astype(np.bool8)
         return hsv_mask
 
 
@@ -323,31 +323,32 @@ class Tracker:
             hsv_mask = self.compute_hsv_mask(color_im, color)
             obs_pts = self.compute_obs_pts(depth_im_gpu, hsv_mask)
 
-            # # add fake points at the prev end cap position
-            # fake_pts = np.stack([self.G.nodes[u]['pos_list'][-1], self.G.nodes[v]['pos_list'][-1]])
-            # fake_pts = torch.from_numpy(fake_pts).to(torch.float32).cuda()
-            # fake_pts = torch.tile(fake_pts, (50, 1))
-            # obs_pts = torch.vstack([obs_pts, fake_pts])
-
-            u_obs_pts, v_obs_pts = self.filter_obs_pts(obs_pts, color, radius=0.12, thresh=0.025)
-            obs_pts = torch.vstack([u_obs_pts, v_obs_pts])
-
             # add fake points at the prev end cap position
-            if u_obs_pts.shape[0] < 10:
-                fake_pts = self.G.nodes[u]['pos_list'][-1]
-                fake_pts = torch.from_numpy(fake_pts).to(torch.float32).cuda()
-                fake_pts = torch.tile(fake_pts, (10, 1))
-                obs_pts = torch.vstack([obs_pts, fake_pts])
+            fake_pts = np.stack([self.G.nodes[u]['pos_list'][-1], self.G.nodes[v]['pos_list'][-1]])
+            fake_pts = torch.from_numpy(fake_pts).to(torch.float32).cuda()
+            fake_pts = torch.tile(fake_pts, (50, 1))
+            obs_pts = torch.vstack([obs_pts, fake_pts])
 
-            if v_obs_pts.shape[0] < 10:
-                fake_pts = self.G.nodes[v]['pos_list'][-1]
-                fake_pts = torch.from_numpy(fake_pts).to(torch.float32).cuda()
-                fake_pts = torch.tile(fake_pts, (10, 1))
-                obs_pts = torch.vstack([obs_pts, fake_pts])
+            # u_obs_pts, v_obs_pts = self.filter_obs_pts(obs_pts, color, radius=0.12, thresh=0.025)
+            # obs_pts = torch.vstack([u_obs_pts, v_obs_pts])
+
+            # # add fake points at the prev end cap position
+            # if u_obs_pts.shape[0] < 10:
+            #     fake_pts = self.G.nodes[u]['pos_list'][-1]
+            #     fake_pts = torch.from_numpy(fake_pts).to(torch.float32).cuda()
+            #     fake_pts = torch.tile(fake_pts, (10, 1))
+            #     obs_pts = torch.vstack([obs_pts, fake_pts])
+
+            # if v_obs_pts.shape[0] < 10:
+            #     fake_pts = self.G.nodes[v]['pos_list'][-1]
+            #     fake_pts = torch.from_numpy(fake_pts).to(torch.float32).cuda()
+            #     fake_pts = torch.tile(fake_pts, (10, 1))
+            #     obs_pts = torch.vstack([obs_pts, fake_pts])
 
             obs_pts_dict[color] = obs_pts
         # print(f"color filter takes: {time.time() - tic}s")
 
+        max_distances = [0.3, 0.2, 0.15, 0.08, 0.04]
         for iter in range(max_iter):
             # render current state (end caps only)
 
@@ -379,8 +380,9 @@ class Tracker:
 
                 obs_pts = obs_pts_dict[color]
                 prev_pose = self.G.edges[u, v]['pose_list'][-1].copy()
-                # rod_pose, Q, P = self.projective_icp_cuda(obs_pts, rendered_pts, prev_pose, max_distance=0.1)
-                rod_pose, Q, P = self.projective_icp_cuda(obs_pts, rendered_pts, prev_pose, max_distance=0.1 / (iter + 1))
+                # rod_pose, Q, P = self.projective_icp_cuda(obs_pts, rendered_pts, prev_pose, max_distance=0.05)
+                # rod_pose, Q, P = self.projective_icp_cuda(obs_pts, rendered_pts, prev_pose, max_distance=(1 - iter / max_iter) * 0.15)
+                rod_pose, Q, P = self.projective_icp_cuda(obs_pts, rendered_pts, prev_pose, max_distance=max_distances[iter])
 
                 if iter == 0:
                     self.G.edges[u, v]['pose_list'].append(rod_pose)
@@ -492,22 +494,22 @@ class Tracker:
             constraints.append(constraint)
 
         # Add constraints between the lowest node and the ground (assuming quasi-static)
-        cam_to_world = la.inv(self.data_cfg['cam_extr'])
-        R = cam_to_world[:3, :3]
-        t = cam_to_world[:3, 3]
-        for _, (u, v) in self.data_cfg['color_to_rod'].items():
-            u_prev_pos = self.G.nodes[u]['pos_list'][-1]
-            v_prev_pos = self.G.nodes[v]['pos_list'][-1]
-            u_prev_world_pos = R @ u_prev_pos + t
-            v_prev_world_pos = R @ v_prev_pos + t
-            u_z = u_prev_world_pos[2]
-            v_z = v_prev_world_pos[2]
-            ground_node = u if u_z < v_z else v
+        # cam_to_world = la.inv(self.data_cfg['cam_extr'])
+        # R = cam_to_world[:3, :3]
+        # t = cam_to_world[:3, 3]
+        # for _, (u, v) in self.data_cfg['color_to_rod'].items():
+        #     u_prev_pos = self.G.nodes[u]['pos_list'][-1]
+        #     v_prev_pos = self.G.nodes[v]['pos_list'][-1]
+        #     u_prev_world_pos = R @ u_prev_pos + t
+        #     v_prev_world_pos = R @ v_prev_pos + t
+        #     u_z = u_prev_world_pos[2]
+        #     v_z = v_prev_world_pos[2]
+        #     ground_node = u if u_z < v_z else v
 
-            constraint = dict()
-            constraint['type'] = 'eq'
-            constraint['fun'] = self.ground_constraint_generator(ground_node, rod_diameter=0.03)
-            # constraints.append(constraint)  # comment this if doesn't work
+        #     constraint = dict()
+        #     constraint['type'] = 'eq'
+        #     constraint['fun'] = self.ground_constraint_generator(ground_node, rod_diameter=0.03)
+        #     constraints.append(constraint)  # comment this if doesn't work
 
         rods = list(self.data_cfg['color_to_rod'].values())
         for i, (u, v) in enumerate(rods):
@@ -841,15 +843,15 @@ class Tracker:
 if __name__ == '__main__':
     parser = ArgumentParser()
     parser.add_argument("--dataset", default="dataset")
-    parser.add_argument("--video_id", default="monday_roll1")
-    # parser.add_argument("--video_id", default="monday_roll15")
+    # parser.add_argument("--video_id", default="monday_roll1")
+    parser.add_argument("--video_id", default="monday_roll15")
     # parser.add_argument("--video_id", default="shiyang11")
     # parser.add_argument("--video_id", default="socks6")
     parser.add_argument("--rod_mesh_file", default="pcd/yale/struct_with_socks_new.ply")
     parser.add_argument("--top_end_cap_mesh_file", default="pcd/yale/end_cap_top_new.obj")
     parser.add_argument("--bottom_end_cap_mesh_file", default="pcd/yale/end_cap_bottom_new.obj")
     parser.add_argument("--first_frame_id", default=0, type=int)
-    parser.add_argument("--max_iter", default=3, type=int)
+    parser.add_argument("--max_iter", default=4, type=int)
     parser.add_argument("-v", "--visualize", default=False, action="store_true")
     args = parser.parse_args()
 
@@ -896,7 +898,6 @@ if __name__ == '__main__':
     # track frames
     os.makedirs(os.path.join(video_path, "scene_cloud"), exist_ok=True)
     os.makedirs(os.path.join(video_path, "estimation_cloud"), exist_ok=True)
-    os.makedirs(os.path.join(video_path, "raw_estimation"), exist_ok=True)
 
     if args.visualize:
         cv2.namedWindow("estimation")
@@ -972,6 +973,12 @@ if __name__ == '__main__':
                 rod_pcd.transform(rod_pose)
                 robot_cloud += rod_pcd
 
+            robot_pts = np.asarray(robot_cloud.points)
+            bbox = o3d.geometry.AxisAlignedBoundingBox()
+            bbox.min_bound = robot_pts.min(axis=0) - 0.05
+            bbox.max_bound = robot_pts.max(axis=0) + 0.05
+            scene_pcd = scene_pcd.crop(bbox)
+
             # mesh_box = o3d.geometry.TriangleMesh.create_box(width=1.0, height=1.0, depth=1.0)
             # mesh_box.translate([0, 0, -1])
 
@@ -981,8 +988,8 @@ if __name__ == '__main__':
             # estimation_cloud.transform(la.inv(tracker.data_cfg['cam_extr']))
             # o3d.visualization.draw_geometries([estimation_cloud, mesh_box])
 
-            # o3d.io.write_point_cloud(os.path.join(video_path, "scene_cloud", f"{idx:04d}.ply"), scene_pcd)
-            o3d.io.write_point_cloud(os.path.join(video_path, "estimation_cloud", f"{idx:04d}.ply"), estimation_cloud)
+            # o3d.io.write_point_cloud(os.path.join(video_path, "scene_cloud", f"{idx:04d}.pcd"), scene_pcd)
+            o3d.io.write_point_cloud(os.path.join(video_path, "estimation_cloud", f"{idx:04d}.pcd"), estimation_cloud)
 
     # save rod poses and end cap positions to file
     pose_output_folder = os.path.join(video_path, "poses")
