@@ -59,8 +59,8 @@ if __name__ == '__main__':
                 v_pos = np.array([v_pos['x'], v_pos['y'], v_pos['z']]) / args.mocap_scale
                 mocap_dist[sensor_id].append(la.norm(u_pos - v_pos))
 
-            predicted_errors[sensor_id].append(np.abs(mocap_dist[sensor_id][-1] - predicted_dist[sensor_id][-1])*100)
             measured_errors[sensor_id].append(np.abs(mocap_dist[sensor_id][-1] - measured_dist[sensor_id][-1])*100)
+            predicted_errors[sensor_id].append(np.abs(mocap_dist[sensor_id][-1] - predicted_dist[sensor_id][-1])*100)
 
     os.makedirs(os.path.join(args.dataset, args.video, "error_analysis"), exist_ok=True)
 

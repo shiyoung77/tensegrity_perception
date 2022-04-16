@@ -1,11 +1,8 @@
 import os
-import importlib
 import json
 from argparse import ArgumentParser
-from collections import defaultdict
 
 import numpy as np
-import scipy.linalg as la
 from matplotlib import pyplot as plt
 
 
@@ -19,7 +16,7 @@ if __name__ == '__main__':
 
     timestamps = []
     for i in range(num_frames):
-        info_path = os.path.join(args.dataset, args.video, 'data', f'{i:04d}.json')
+        info_path = os.path.join(args.dataset, args.video, 'data', '%04d.json'%i)
         with open(info_path, 'r') as f:
             info = json.load(f)
 
@@ -34,6 +31,6 @@ if __name__ == '__main__':
     plt.plot(range(num_frames - 1), time_intervals)
     plt.xlabel('frame id')
     plt.ylabel('time interval (s)')
-    plt.title(f'{mean = :.3f}s, {std = :.3f}s')
+    plt.title('video: %s\nmean = %.3f, std = %.3fs' %(args.video, mean, std))
     plt.grid(True)
     plt.show()
