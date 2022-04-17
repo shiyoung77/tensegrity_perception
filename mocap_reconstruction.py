@@ -64,16 +64,16 @@ def estimate_rod_pose_from_end_cap_centers(curr_end_cap_centers, prev_rod_pose=N
 if __name__ == '__main__':
     parser = ArgumentParser()
     parser.add_argument("--dataset", default="dataset")
-    parser.add_argument("--video_id", default="monday_roll15")
+    parser.add_argument("-v", "--video", default="monday_roll15")
     parser.add_argument("--rod_mesh_file", default="pcd/yale/untethered_rod_w_end_cap.ply")
     parser.add_argument("--rod_pcd_file", default="pcd/yale/untethered_rod_w_end_cap.pcd")
     parser.add_argument("--start_frame", default=0, type=int)
     args = parser.parse_args()
 
-    video_path = os.path.join(args.dataset, args.video_id)
+    video_path = os.path.join(args.dataset, args.video)
     prefixes = sorted([i.split('.')[0] for i in os.listdir(os.path.join(video_path, 'color'))])
 
-    data_cfg_module = importlib.import_module(f'{args.dataset}.{args.video_id}.config')
+    data_cfg_module = importlib.import_module(f'{args.dataset}.{args.video}.config')
     data_cfg = data_cfg_module.get_config(read_cfg=True)
     cam_intr = np.array(data_cfg['cam_intr'])
 
@@ -84,10 +84,10 @@ if __name__ == '__main__':
     }
 
     # load transformation from camera to motion capture
-    cam_to_mocap_filepath = os.path.join(args.dataset, args.video_id, "cam_to_mocap.npy")
+    cam_to_mocap_filepath = os.path.join(args.dataset, args.video, "cam_to_mocap.npy")
     if not os.path.exists(cam_to_mocap_filepath):
         print("[WARNING] Transformation not found. Start estimating... It may not be accurate.")
-        os.system("python compute_T_from_cam_to_mocap.py")
+        os.system(f"python compute_T_from_cam_to_mocap.py -v {args.video}")
     cam_to_mocap = np.load(cam_to_mocap_filepath)
     mocap_to_cam = la.inv(cam_to_mocap)
 

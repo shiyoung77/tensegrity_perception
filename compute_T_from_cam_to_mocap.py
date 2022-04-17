@@ -8,7 +8,36 @@ import json
 from argparse import ArgumentParser
 
 import numpy as np
-import scipy.linalg as la
+
+
+def compute_transformation(Q: np.ndarray, P: np.ndarray):
+    """
+    compute rigid transformation T = [R, t], s.t. Q = R @ P + t
+
+    Q (np.ndarray): shape=(3, N)
+    P (np.ndarray): shape=(3, N)
+    """
+    P_mean = P.mean(1, keepdims=True)  # (3, 1)
+    Q_mean = Q.mean(1, keepdims=True)  # (3, 1)
+
+    H = (Q - Q_mean) @ (P - P_mean).T
+    U, D, V_t = np.linalg.svd(H)
+    R = U @ V_t
+
+    # ensure that R is in the right-hand coordinate system, very important!!!
+    # https://en.wikipedia.org/wiki/Kabsch_algorithm
+    d = np.sign(np.linalg.det(U @ V_t))
+    R = U @ np.array([
+        [1, 0, 0],
+        [0, 1, 0],
+        [0, 0, d]
+    ], dtype=np.float64) @ V_t
+    t = Q_mean - R @ P_mean
+
+    T = np.eye(4)
+    T[:3, :3] = R
+    T[:3, 3:4] = t
+    return T
 
 
 if __name__ == '__main__':
@@ -51,18 +80,7 @@ if __name__ == '__main__':
 
     Q = np.array(Q).T  # (3, num_endcaps * N)
     P = np.array(P).T  # (3, num_endcaps * N)
-
-    P_mean = P.mean(1, keepdims=True)  # (3, 1)
-    Q_mean = Q.mean(1, keepdims=True)  # (3, 1)
-
-    H = (Q - Q_mean) @ (P - P_mean).T
-    U, D, V_T = la.svd(H)
-    R = U @ V_T
-    t = Q_mean - R @ P_mean
-
-    T = np.eye(4)
-    T[:3, :3] = R
-    T[:3, 3:4] = t
+    T = compute_transformation(Q, P)
 
     output_path = os.path.join(args.dataset, args.video, 'cam_to_mocap.npy')
     np.save(output_path, T)

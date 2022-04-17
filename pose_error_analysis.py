@@ -39,7 +39,7 @@ if __name__ == '__main__':
     cam_to_mocap_filepath = os.path.join(args.dataset, args.video, "cam_to_mocap.npy")
     if not os.path.exists(cam_to_mocap_filepath):
         print("[WARNING] Transformation not found. Start estimating... It may not be accurate.")
-        os.system("python compute_T_from_cam_to_mocap.py")
+        os.system(f"python compute_T_from_cam_to_mocap.py -v {args.video}")
     T = np.load(cam_to_mocap_filepath)
     R = T[:3, :3]
     t = T[:3, 3:4]

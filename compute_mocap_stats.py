@@ -14,15 +14,15 @@ import matplotlib.pyplot as plt
 if __name__ == '__main__':
     parser = ArgumentParser()
     parser.add_argument("--dataset", default="dataset")
-    parser.add_argument("--video_id", default="monday_roll15")
+    parser.add_argument("-v", "--video", default="monday_roll15")
     parser.add_argument("--rod_mesh_file", default="pcd/yale/untethered_rod_w_end_cap.ply")
     parser.add_argument("--rod_pcd_file", default="pcd/yale/untethered_rod_w_end_cap.pcd")
     parser.add_argument("--start_frame", default=0, type=int)
     args = parser.parse_args()
 
-    video_path = os.path.join(args.dataset, args.video_id)
+    video_path = os.path.join(args.dataset, args.video)
     prefixes = sorted([i.split('.')[0] for i in os.listdir(os.path.join(video_path, 'data'))])
-    data_cfg_module = importlib.import_module(f'{args.dataset}.{args.video_id}.config')
+    data_cfg_module = importlib.import_module(f'{args.dataset}.{args.video}.config')
     data_cfg = data_cfg_module.get_config(read_cfg=True)
 
     counter = defaultdict(int)
