@@ -142,48 +142,30 @@ def generate_coordinate_frame(T, scale=0.05):
     return mesh.transform(T)
 
 
-def np_rotmat_of_two_v(v1, v2):
-    v1 = v1 / (np.linalg.norm(v1, axis=-1, keepdims=True) + 1e-20)
-    v2 = v2 / (np.linalg.norm(v2, axis=-1, keepdims=True) + 1e-20)
+def kabsch(Q: np.ndarray, P: np.ndarray):
+    """
+    compute rigid transformation T = [R, t], s.t. Q = R @ P + t
+    Q (np.ndarray): shape=(3, N)
+    P (np.ndarray): shape=(3, N)
+    """
+    P_mean = P.mean(1, keepdims=True)  # (3, 1)
+    Q_mean = Q.mean(1, keepdims=True)  # (3, 1)
 
-    if np.allclose(v1, -v2, atol=1e-3) or np.isclose(np.dot(v1, v2), -1, atol=1e-3):
-        # rotmat = -np.eye(3)
-        tmp_vs = [[1, 0, 0], [0, 1, 0], [0, 0, 1], [-1, 0, 0], [0, -1, 0], [0, 0, -1]]
-        for tmp_v in tmp_vs:
-            if np.isclose(np.dot(v1, tmp_v), -1, atol=1e-3) or np.isclose(np.dot(tmp_v, v2), -1, atol=1e-3):
-                continue
-            rotmat1 = np_rotmat_of_two_v(v1, tmp_v)
-            rotmat2 = np_rotmat_of_two_v(tmp_v, v2)
-            rotmat = np.matmul(rotmat2, rotmat1)
-            break
-    else:
-        v = np.cross(v1, v2)
-        s = np.linalg.norm(v)  # sin is positive in [0, pi]
-        c = v1.dot(v2)
+    H = (Q - Q_mean) @ (P - P_mean).T
+    U, D, V_t = la.svd(H)
+    R = U @ V_t
 
-        if np.isclose(s, 0) and c > 0:
-            rotmat = np.eye(3)
-        else:
-            vHat = np_axis_to_skewsym(v)
-            vHatSq = np.dot(vHat, vHat)
-            rotmat = np.eye(3) + s * vHat + (1 - c) * vHatSq
-    assert np.allclose(v2, rotmat.dot(v1))
-    assert np.cross(rotmat[:, 0], rotmat[:, 1]).dot(rotmat[:, 2]) > 0
-    return rotmat
+    # ensure that R is in the right-hand coordinate system, very important!!!
+    # https://en.wikipedia.org/wiki/Kabsch_algorithm
+    d = np.sign(la.det(U @ V_t))
+    R = U @ np.array([
+        [1, 0, 0],
+        [0, 1, 0],
+        [0, 0, d]
+    ], dtype=np.float64) @ V_t
+    t = Q_mean - R @ P_mean
 
-
-def np_axis_to_skewsym(v):
-    '''
-        Converts an axis into a skew symmetric matrix format.
-    '''
-    assert not np.isclose(np.linalg.norm(v), 0)
-    v = v / np.linalg.norm(v)
-    vHat = np.zeros((3, 3))
-    vHat[0, 1], vHat[0, 2] = -v[2], v[1]
-    vHat[1, 0], vHat[1, 2] = v[2], -v[0]
-    vHat[2, 0], vHat[2, 1] = -v[1], v[0]
-    return vHat
-
-
-if __name__ == '__main__':
-    pass
+    T = np.eye(4)
+    T[:3, :3] = R
+    T[:3, 3:4] = t
+    return T
