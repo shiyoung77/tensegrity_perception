@@ -1,6 +1,7 @@
 """
 compute statistics of data captured from the motion capture system
 """
+
 from collections import defaultdict
 import os
 import importlib

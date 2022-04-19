@@ -1,7 +1,13 @@
-########################################################################################
-# Compute the transformation from the camera frame to the motion capture frame
-# python >= 3.6 required
-# WARNING: This is not the ideal way to do it. The estiamted transformation may contain error.
+"""
+Estimate the transformation from the camera frame to the motion capture frame
+using estimated endcap positions in camera frame and measured endcap positions
+in motion capture frame
+
+WARNING:
+The result depends on pose estimation. This is not the ideal way to do it.
+
+python >= 3.6 required
+"""
 
 import os
 import json
@@ -9,36 +15,7 @@ from argparse import ArgumentParser
 
 import numpy as np
 
-
-def compute_transformation(Q: np.ndarray, P: np.ndarray):
-    """
-    compute rigid transformation T = [R, t], s.t. Q = R @ P + t
-
-    Q (np.ndarray): shape=(3, N)
-    P (np.ndarray): shape=(3, N)
-    """
-    P_mean = P.mean(1, keepdims=True)  # (3, 1)
-    Q_mean = Q.mean(1, keepdims=True)  # (3, 1)
-
-    H = (Q - Q_mean) @ (P - P_mean).T
-    U, D, V_t = np.linalg.svd(H)
-    R = U @ V_t
-
-    # ensure that R is in the right-hand coordinate system, very important!!!
-    # https://en.wikipedia.org/wiki/Kabsch_algorithm
-    d = np.sign(np.linalg.det(U @ V_t))
-    R = U @ np.array([
-        [1, 0, 0],
-        [0, 1, 0],
-        [0, 0, d]
-    ], dtype=np.float64) @ V_t
-    t = Q_mean - R @ P_mean
-
-    T = np.eye(4)
-    T[:3, :3] = R
-    T[:3, 3:4] = t
-    return T
-
+from perception_utils import kabsch
 
 if __name__ == '__main__':
     parser = ArgumentParser("pose evalutation")
@@ -80,7 +57,7 @@ if __name__ == '__main__':
 
     Q = np.array(Q).T  # (3, num_endcaps * N)
     P = np.array(P).T  # (3, num_endcaps * N)
-    T = compute_transformation(Q, P)
+    T = kabsch(Q, P)
 
     output_path = os.path.join(args.dataset, args.video, 'cam_to_mocap.npy')
     np.save(output_path, T)

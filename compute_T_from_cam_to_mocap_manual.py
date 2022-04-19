@@ -1,3 +1,11 @@
+"""
+Estimate the transformation from the camera frame to the motion capture frame
+using manually labeled endcap positions in camera frame and measured endcap
+positions in motion capture frame
+
+python >= 3.6 required
+"""
+
 import os
 import importlib
 import json
@@ -5,6 +13,8 @@ from argparse import ArgumentParser
 
 import numpy as np
 import cv2
+
+from perception_utils import kabsch
 
 
 clicked_pts = []
@@ -17,42 +27,11 @@ def click_callback(event, x, y, flags, param):
         print(clicked_pts)
 
 
-def compute_transformation(Q: np.ndarray, P: np.ndarray):
-    """
-    compute rigid transformation T = [R, t], s.t. Q = R @ P + t
-
-    Q (np.ndarray): shape=(3, N)
-    P (np.ndarray): shape=(3, N)
-    """
-    P_mean = P.mean(1, keepdims=True)  # (3, 1)
-    Q_mean = Q.mean(1, keepdims=True)  # (3, 1)
-
-    H = (Q - Q_mean) @ (P - P_mean).T
-    U, D, V_t = np.linalg.svd(H)
-    R = U @ V_t
-
-    # ensure that R is in the right-hand coordinate system, very important!!!
-    # https://en.wikipedia.org/wiki/Kabsch_algorithm
-    d = np.sign(np.linalg.det(U @ V_t))
-    R = U @ np.array([
-        [1, 0, 0],
-        [0, 1, 0],
-        [0, 0, d]
-    ], dtype=np.float64) @ V_t
-    t = Q_mean - R @ P_mean
-
-    T = np.eye(4)
-    T[:3, :3] = R
-    T[:3, 3:4] = t
-    return T
-
-
 if __name__ == '__main__':
     parser = ArgumentParser("pose evalutation")
     parser.add_argument("--dataset", default="dataset")
     parser.add_argument("-v", "--video", default="shiyang3")
     parser.add_argument("--start_frame", default=0, type=int)
-    parser.add_argument("--num_endcaps", default=6, type=int)
     parser.add_argument("--mocap_scale", default=1000, type=int, help="scale of measured position (mm by default)")
     args = parser.parse_args()
 
@@ -116,7 +95,7 @@ if __name__ == '__main__':
 
     P = np.vstack(P).T
     Q = np.vstack(Q).T
-    T = compute_transformation(Q, P)
+    T = kabsch(Q, P)
     print(T)
 
     output_path = os.path.join(args.dataset, args.video, 'cam_to_mocap.npy')

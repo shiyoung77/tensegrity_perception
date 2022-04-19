@@ -104,6 +104,4 @@ if __name__ == '__main__':
         axes[row, col].set_ylim(0)
     plt.subplots_adjust(hspace=0.5)
     plt.savefig(os.path.join(args.dataset, args.video, "error_analysis", "cable_length_error.png"), dpi=150)
-
-
     plt.show()
