@@ -261,10 +261,10 @@ class Tracker:
     def compute_hsv_mask(self, color_im, color) -> np.ndarray:
         color_im_hsv = cv2.cvtColor(color_im, cv2.COLOR_RGB2HSV)
         hsv_mask = cv2.inRange(color_im_hsv,
-                            lowerb=tuple(self.data_cfg['hsv_ranges'][color][0]),
-                            upperb=tuple(self.data_cfg['hsv_ranges'][color][1])).astype(np.bool8)
+                               lowerb=tuple(self.data_cfg['hsv_ranges'][color][0]),
+                               upperb=tuple(self.data_cfg['hsv_ranges'][color][1])).astype(np.bool8)
         # if color == 'red':
-        #     hsv_mask |= cv2.inRange(color_im_hsv, lowerb=(0, 80, 50), upperb=(15, 255, 255)).astype(np.bool8)
+        #     hsv_mask |= cv2.inRange(color_im_hsv, lowerb=(0, 100, 100), upperb=(10, 255, 255)).astype(np.bool8)
         return hsv_mask
 
 
@@ -321,16 +321,20 @@ class Tracker:
         obs_pts_dict = dict()
         for color, (u, v) in self.data_cfg['color_to_rod'].items():
             hsv_mask = self.compute_hsv_mask(color_im, color)
+            if color == 'blue':
+                hsv_mask_255 = hsv_mask.astype(np.uint8) * 255
+                cv2.imshow("obs mask", hsv_mask_255)
+                # cv2.imwrite(os.path.join(video_path, 'red_hsv_mask', f'{prefix}.png'), hsv_mask_255)
             obs_pts = self.compute_obs_pts(depth_im_gpu, hsv_mask)
+
+            # u_obs_pts, v_obs_pts = self.filter_obs_pts(obs_pts, color, radius=0.12, thresh=0.025)
+            # obs_pts = torch.vstack([u_obs_pts, v_obs_pts])
 
             # add fake points at the prev end cap position
             fake_pts = np.stack([self.G.nodes[u]['pos_list'][-1], self.G.nodes[v]['pos_list'][-1]])
             fake_pts = torch.from_numpy(fake_pts).to(torch.float32).cuda()
             fake_pts = torch.tile(fake_pts, (50, 1))
             obs_pts = torch.vstack([obs_pts, fake_pts])
-
-            # u_obs_pts, v_obs_pts = self.filter_obs_pts(obs_pts, color, radius=0.12, thresh=0.025)
-            # obs_pts = torch.vstack([u_obs_pts, v_obs_pts])
 
             # # add fake points at the prev end cap position
             # if u_obs_pts.shape[0] < 10:
@@ -348,7 +352,7 @@ class Tracker:
             obs_pts_dict[color] = obs_pts
         # print(f"color filter takes: {time.time() - tic}s")
 
-        max_distances = [0.3, 0.2, 0.15, 0.08, 0.04]
+        max_distances = [0.3, 0.15, 0.1, 0.06, 0.03]
         for iter in range(max_iter):
             # render current state (end caps only)
 
