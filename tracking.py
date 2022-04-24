@@ -839,7 +839,7 @@ if __name__ == '__main__':
     parser.add_argument("--rod_mesh_file", default="pcd/yale/struct_with_socks_new.ply")
     parser.add_argument("--top_endcap_mesh_file", default="pcd/yale/end_cap_top_new.obj")
     parser.add_argument("--bottom_endcap_mesh_file", default="pcd/yale/end_cap_bottom_new.obj")
-    parser.add_argument("--first_frame_id", default=0, type=int)
+    parser.add_argument("--start_frame", default=0, type=int)
     parser.add_argument("--max_correspondence_distances", default=[0.3, 0.15, 0.1, 0.06, 0.03], type=float, nargs="+")
     parser.add_argument("--add_fake_pts", action="store_true")
     parser.add_argument("--filter_observed_pts", action="store_true")
@@ -871,9 +871,9 @@ if __name__ == '__main__':
     tracker = Tracker(args, data_cfg, rod_pcd, rod_mesh, [top_endcap_mesh, bottom_endcap_mesh])
 
     # initialize tracker with the first frame
-    color_path = os.path.join(video_path, 'color', f'{prefixes[args.first_frame_id]}.png')
-    depth_path = os.path.join(video_path, 'depth', f'{prefixes[args.first_frame_id]}.png')
-    info_path = os.path.join(video_path, 'data', f'{prefixes[args.first_frame_id]}.json')
+    color_path = os.path.join(video_path, 'color', f'{prefixes[args.start_frame]}.png')
+    depth_path = os.path.join(video_path, 'depth', f'{prefixes[args.start_frame]}.png')
+    info_path = os.path.join(video_path, 'data', f'{prefixes[args.start_frame]}.json')
     color_im = cv2.cvtColor(cv2.imread(color_path), cv2.COLOR_BGR2RGB)
     depth_im = cv2.imread(depth_path, cv2.IMREAD_UNCHANGED).astype(np.float32) / data_cfg['depth_scale']
     with open(info_path, 'r') as f:
@@ -904,7 +904,7 @@ if __name__ == '__main__':
         key = cv2.waitKey(0)
 
     data = dict()
-    for idx in tqdm(range(args.first_frame_id + 1, len(prefixes))):
+    for idx in tqdm(range(args.start_frame + 1, len(prefixes))):
         prefix = prefixes[idx]
         color_path = os.path.join(video_path, 'color', f'{prefix}.png')
         depth_path = os.path.join(video_path, 'depth', f'{prefix}.png')
@@ -926,7 +926,7 @@ if __name__ == '__main__':
         data[prefix]['depth_im'] = depth_im
         data[prefix]['info'] = info
 
-    for idx in tqdm(range(args.first_frame_id + 1, len(prefixes))):
+    for idx in tqdm(range(args.start_frame + 1, len(prefixes))):
         prefix = prefixes[idx]
         color_im = data[prefix]['color_im']
         depth_im = data[prefix]['depth_im']
