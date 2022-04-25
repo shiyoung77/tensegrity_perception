@@ -4,6 +4,7 @@ import open3d as o3d
 import numpy as np
 import scipy.linalg as la
 
+
 def timeit(f, n=1, need_compile=False):
     def wrapper(*args, **kwargs):
         if need_compile:  # ignore the first run if needs compile
@@ -144,7 +145,10 @@ def generate_coordinate_frame(T, scale=0.05):
 
 def kabsch(Q: np.ndarray, P: np.ndarray):
     """
-    compute rigid transformation T = [R, t], s.t. Q = R @ P + t
+    Kabsch algorithm: https://en.wikipedia.org/wiki/Kabsch_algorithm
+    compute optimial transformation between two sets of points
+    T = [R, t], s.t. Q = R @ P + t
+
     Q (np.ndarray): shape=(3, N)
     P (np.ndarray): shape=(3, N)
     """
@@ -152,17 +156,17 @@ def kabsch(Q: np.ndarray, P: np.ndarray):
     Q_mean = Q.mean(1, keepdims=True)  # (3, 1)
 
     H = (Q - Q_mean) @ (P - P_mean).T
-    U, D, V_t = la.svd(H)
+    U, _, V_t = la.svd(H)
     R = U @ V_t
 
     # ensure that R is in the right-hand coordinate system, very important!!!
-    # https://en.wikipedia.org/wiki/Kabsch_algorithm
     d = np.sign(la.det(U @ V_t))
-    R = U @ np.array([
+    D = np.array([
         [1, 0, 0],
         [0, 1, 0],
         [0, 0, d]
-    ], dtype=np.float64) @ V_t
+    ], dtype=np.float64)
+    R = U @ D @ V_t
     t = Q_mean - R @ P_mean
 
     T = np.eye(4)

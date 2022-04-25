@@ -16,8 +16,6 @@ if __name__ == '__main__':
     parser = ArgumentParser()
     parser.add_argument("--dataset", default="dataset")
     parser.add_argument("-v", "--video", default="monday_roll15")
-    parser.add_argument("--rod_mesh_file", default="pcd/yale/untethered_rod_w_end_cap.ply")
-    parser.add_argument("--rod_pcd_file", default="pcd/yale/untethered_rod_w_end_cap.pcd")
     parser.add_argument("--start_frame", default=0, type=int)
     args = parser.parse_args()
 
