@@ -179,22 +179,22 @@ class Tracker:
                 complete_obs_mask |= mask
 
                 endcap_pcd = perception_utils.create_pcd(masked_depth_im, self.data_cfg['cam_intr'])
+                endcap_pts = torch.from_numpy(np.asarray(endcap_pcd.points))
 
                 # filter observable endcap points by z coordinates
                 if self.cfg.filter_observed_pts:
-                    endcap_pts = torch.from_numpy(np.asarray(endcap_pcd.points))
                     zs = endcap_pts[:, 2]
                     z_min = torch.sort(zs[zs > 0]).values[int(endcap_pts.shape[0] * 0.1)]
                     endcap_pts = endcap_pts[zs < z_min + 0.01]
                     endcap_center = endcap_pts.mean(dim=0).numpy()
-
-                # filter observable endcap point cloud by finding the largest cluster
-                # labels = np.asarray(endcap_pcd.cluster_dbscan(eps=0.005, min_points=10, print_progress=False))
-                # points_for_each_cluster = [(labels == label).sum() for label in range(labels.max() + 1)]
-                # label = np.argmax(points_for_each_cluster)
-                # masked_indices = np.where(labels == label)[0]
-                # endcap_pcd = endcap_pcd.select_by_index(masked_indices)
-                # endcap_center = np.asarray(endcap_pcd.points).mean(axis=0)
+                else:
+                    # filter observable endcap point cloud by finding the largest cluster
+                    labels = np.asarray(endcap_pcd.cluster_dbscan(eps=0.005, min_points=10, print_progress=False))
+                    points_for_each_cluster = [(labels == label).sum() for label in range(labels.max() + 1)]
+                    label = np.argmax(points_for_each_cluster)
+                    masked_indices = np.where(labels == label)[0]
+                    endcap_pcd = endcap_pcd.select_by_index(masked_indices)
+                    endcap_center = np.asarray(endcap_pcd.points).mean(axis=0)
 
                 endcap_centers.append(endcap_center)
                 obs_pts.append(endcap_pts)
@@ -325,13 +325,21 @@ class Tracker:
         # get observed 3D points for both end caps of each rod
         tic = time.time()
         obs_pts_dict = dict()
+        obs_vis = np.zeros((self.data_cfg['im_h'], self.data_cfg['im_w'], 3), dtype=np.uint8)
         for color, (u, v) in self.data_cfg['color_to_rod'].items():
             hsv_mask = self.compute_hsv_mask(color_im, color)
-            # if color == 'blue':
-            #     hsv_mask_255 = hsv_mask.astype(np.uint8) * 255
-            #     cv2.imshow("obs mask", hsv_mask_255)
             obs_pts = self.compute_obs_pts(depth_im_gpu, hsv_mask)
             obs_pts_dict[color] = obs_pts
+
+            # for debugging purpose
+            if color == 'red':
+                obs_vis[:, :, 2][hsv_mask] = 255
+            elif color == 'green':
+                obs_vis[:, :, 1][hsv_mask] = 255
+            elif color == 'blue':
+                obs_vis[:, :, 0][hsv_mask] = 255
+        self.curr_obs_im = obs_vis
+        # cv2.imshow("obs", obs_vis)
         # print(f"color filter takes: {time.time() - tic}s")
 
         for iter, max_distance in enumerate(self.cfg.max_correspondence_distances):
@@ -953,6 +961,9 @@ if __name__ == '__main__':
                 exit(0)
             os.makedirs(os.path.join(video_path, 'estimation_vis'), exist_ok=True)
             cv2.imwrite(os.path.join(video_path, 'estimation_vis', f'{prefix}.png'), vis_im_bgr)
+
+            os.makedirs(os.path.join(video_path, 'obs_vis'), exist_ok=True)
+            cv2.imwrite(os.path.join(video_path, 'obs_vis', f'{prefix}.png'), tracker.curr_obs_im)
 
             robot_cloud = o3d.geometry.PointCloud()
             for color, (u, v) in data_cfg['color_to_rod'].items():

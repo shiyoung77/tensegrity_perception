@@ -1,7 +1,7 @@
 #!/bin/bash
 
 DATASET="dataset"
-VIDEO_ID="shiyang9"
+VIDEO_ID="monday_roll15"
 
 python tracking.py \
     --dataset $DATASET \
