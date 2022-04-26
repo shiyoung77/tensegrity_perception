@@ -367,7 +367,7 @@ class Tracker:
 
                 # filter observed points based on z coordinates
                 if self.cfg.filter_observed_pts:
-                    u_obs_pts, v_obs_pts = self.filter_obs_pts(obs_pts, color, radius=max_distance, thresh=0.01)
+                    u_obs_pts, v_obs_pts = self.filter_obs_pts(obs_pts, color, radius=max_distance, thresh=0.03)
                     obs_pts = torch.vstack([u_obs_pts, v_obs_pts])
 
                 # add fake points at the previous endcap position
@@ -509,6 +509,13 @@ class Tracker:
         #     constraint['fun'] = self.ground_constraint_generator(ground_node)
         #     constraints.append(constraint)  # comment this if doesn't work
 
+        if self.cfg.add_ground_constraints:
+            for u in range(len(self.data_cfg['node_to_color'])):
+                constraint = dict()
+                constraint['type'] = 'ineq'
+                constraint['fun'], constraint['jac'] = self.ground_constraint_generator(u)
+                constraints.append(constraint)
+
         if self.cfg.add_physical_constraints:
             rods = list(self.data_cfg['color_to_rod'].values())
             for i, (u, v) in enumerate(rods):
@@ -556,8 +563,13 @@ class Tracker:
             u_world_pos = R @ u_pos + t
             u_z = u_world_pos[2]
             return u_z - self.data_cfg['rod_diameter'] / 2
+        
+        def jacobian_function(X):
+            result = np.zeros_like(X)
+            result[3 * u : 3 * u + 3] = R[2]
+            return result
 
-        return constraint_function
+        return constraint_function, jacobian_function
 
 
     def objective_function_generator(self, sensor_measurement, sensor_status):
@@ -872,6 +884,7 @@ if __name__ == '__main__':
     parser.add_argument("--filter_observed_pts", action="store_true")
     parser.add_argument("--add_constrained_optimization", action="store_true")
     parser.add_argument("--add_physical_constraints", action="store_true")
+    parser.add_argument("--add_ground_constraints", action="store_true")
     parser.add_argument("-v", "--visualize", action="store_true")
     args = parser.parse_args()
 

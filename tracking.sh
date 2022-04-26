@@ -10,11 +10,12 @@ python tracking.py \
     --top_endcap_mesh_file "pcd/yale/end_cap_top_new.obj" \
     --bottom_endcap_mesh_file "pcd/yale/end_cap_bottom_new.obj" \
     --start_frame 0 \
-    --max_correspondence_distances 0.3 0.25 0.2 0.15 0.1 0.07 0.04 0.02 \
+    --max_correspondence_distances 0.3 0.25 0.2 0.15 0.1 0.06 0.03 \
     --add_fake_pts \
     --filter_observed_pts \
     --add_constrained_optimization \
     --add_physical_constraints \
+    --add_ground_constraints \
     --visualize \
 
 # python compute_T_from_cam_to_mocap_manual.py \
