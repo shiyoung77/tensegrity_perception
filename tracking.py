@@ -181,20 +181,20 @@ class Tracker:
                 endcap_pcd = perception_utils.create_pcd(masked_depth_im, self.data_cfg['cam_intr'])
                 endcap_pts = torch.from_numpy(np.asarray(endcap_pcd.points))
 
-                # filter observable endcap points by z coordinates
-                if self.cfg.filter_observed_pts:
-                    zs = endcap_pts[:, 2]
-                    z_min = torch.sort(zs[zs > 0]).values[int(endcap_pts.shape[0] * 0.1)]
-                    endcap_pts = endcap_pts[zs < z_min + 0.01]
-                    endcap_center = endcap_pts.mean(dim=0).numpy()
-                else:
-                    # filter observable endcap point cloud by finding the largest cluster
-                    labels = np.asarray(endcap_pcd.cluster_dbscan(eps=0.005, min_points=10, print_progress=False))
-                    points_for_each_cluster = [(labels == label).sum() for label in range(labels.max() + 1)]
-                    label = np.argmax(points_for_each_cluster)
-                    masked_indices = np.where(labels == label)[0]
-                    endcap_pcd = endcap_pcd.select_by_index(masked_indices)
-                    endcap_center = np.asarray(endcap_pcd.points).mean(axis=0)
+                # # filter observable endcap points by z coordinates
+                # if self.cfg.filter_observed_pts:
+                #     zs = endcap_pts[:, 2]
+                #     z_min = torch.sort(zs[zs > 0]).values[int(endcap_pts.shape[0] * 0.1)]
+                #     endcap_pts = endcap_pts[zs < z_min + 0.01]
+                #     endcap_center = endcap_pts.mean(dim=0).numpy()
+
+                # filter observable endcap point cloud by finding the largest cluster
+                labels = np.asarray(endcap_pcd.cluster_dbscan(eps=0.005, min_points=1, print_progress=False))
+                points_for_each_cluster = [(labels == label).sum() for label in range(labels.max() + 1)]
+                label = np.argmax(points_for_each_cluster)
+                masked_indices = np.where(labels == label)[0]
+                endcap_pcd = endcap_pcd.select_by_index(masked_indices)
+                endcap_center = np.asarray(endcap_pcd.points).mean(axis=0)
 
                 endcap_centers.append(endcap_center)
                 obs_pts.append(endcap_pts)
@@ -367,7 +367,7 @@ class Tracker:
 
                 # filter observed points based on z coordinates
                 if self.cfg.filter_observed_pts:
-                    u_obs_pts, v_obs_pts = self.filter_obs_pts(obs_pts, color, radius=max_distance, thresh=0.02)
+                    u_obs_pts, v_obs_pts = self.filter_obs_pts(obs_pts, color, radius=max_distance, thresh=0.01)
                     obs_pts = torch.vstack([u_obs_pts, v_obs_pts])
 
                 # add fake points at the previous endcap position
@@ -506,7 +506,7 @@ class Tracker:
 
         #     constraint = dict()
         #     constraint['type'] = 'eq'
-        #     constraint['fun'] = self.ground_constraint_generator(ground_node, rod_diameter=0.03)
+        #     constraint['fun'] = self.ground_constraint_generator(ground_node)
         #     constraints.append(constraint)  # comment this if doesn't work
 
         if self.cfg.add_physical_constraints:
@@ -524,8 +524,7 @@ class Tracker:
 
                     constraint = dict()
                     constraint['type'] = 'ineq'
-                    constraint['fun'], constraint['jac'] = self.rod_constraint_generator(u, v, p, q, alpha1, alpha2,
-                                                                                         rod_diameter=0.03)
+                    constraint['fun'], constraint['jac'] = self.rod_constraint_generator(u, v, p, q, alpha1, alpha2)
                     constraints.append(constraint)
 
         res = minimize(obj_func, init_values, jac=jac_func, method='SLSQP', constraints=constraints)
@@ -547,7 +546,7 @@ class Tracker:
             self.G.edges[u, v]['pose_list'][-1] = optimized_pose
 
 
-    def ground_constraint_generator(self, u, rod_diameter=0.03):
+    def ground_constraint_generator(self, u):
         cam_to_world = la.inv(self.data_cfg['cam_extr'])
         R = cam_to_world[:3, :3]
         t = cam_to_world[:3, 3]
@@ -556,7 +555,7 @@ class Tracker:
             u_pos = X[3 * u: 3 * u + 3]
             u_world_pos = R @ u_pos + t
             u_z = u_world_pos[2]
-            return u_z - rod_diameter / 2
+            return u_z - self.data_cfg['rod_diameter'] / 2
 
         return constraint_function
 
@@ -589,6 +588,11 @@ class Tracker:
                 v_pos = X[(3 * v):(3 * v + 3)]
                 estimated_length = la.norm(u_pos - v_pos)
                 measured_length = sensor_measurement[sensor_id]['length'] / self.data_cfg['cable_length_scale']
+
+                # sanity check
+                if np.abs(estimated_length - measured_length) > 0.1:
+                    factor = 0
+
                 binary_loss += factor * (estimated_length - measured_length)**2
 
             return unary_loss + binary_loss
@@ -619,6 +623,11 @@ class Tracker:
                 v_x, v_y, v_z = X[(3 * v):(3 * v + 3)]
                 l_est = np.sqrt((u_x - v_x)**2 + (u_y - v_y)**2 + (u_z - v_z)**2)
                 l_gt = sensor_measurement[sensor_id]['length'] / self.data_cfg['cable_length_scale']
+
+                # sanity check
+                if np.abs(l_est - l_gt) > 0.1:
+                    factor = 0
+
                 result[3*u : 3*u + 3] += 2*factor*(l_est - l_gt)*np.array([u_x - v_x, u_y - v_y, u_z - v_z]) / l_est
                 result[3*v : 3*v + 3] += 2*factor*(l_est - l_gt)*np.array([v_x - u_x, v_y - u_y, v_z - u_z]) / l_est
 
@@ -646,7 +655,7 @@ class Tracker:
         return constraint_function, jacobian_function
 
 
-    def rod_constraint_generator(self, u, v, p, q, alpha1, alpha2, rod_diameter):
+    def rod_constraint_generator(self, u, v, p, q, alpha1, alpha2):
         try:
             p1 = self.G.nodes[u]['pos_list'][-2]
             p2 = self.G.nodes[v]['pos_list'][-2]
@@ -670,7 +679,7 @@ class Tracker:
             q5 = alpha1 * q1 + (1 - alpha1) * q2  # closest point on (u, v)
             q6 = alpha2 * q3 + (1 - alpha2) * q4  # closest point on (p, q)
             v2 = q5 - q6
-            return v1 @ v2 - rod_diameter
+            return v1 @ v2 - self.data_cfg['rod_diameter']
 
         def jacobian_function(X):
             result = np.zeros_like(X)
@@ -732,12 +741,22 @@ class Tracker:
         # ICP ref: https://www.youtube.com/watch?v=djnd502836w&t=781s
         # nearest neighbor data association
         distances = torch.norm(obs_pts.unsqueeze(1) - rendered_pts.unsqueeze(0), dim=2)  # (N, M)
+
         closest_distance, closest_indices = torch.min(distances, dim=1)  # find corresponded rendered pts for obs pts
         dist_mask = closest_distance < max_distance
-        Q = obs_pts[dist_mask].T  # (3, K)
-        P = rendered_pts[closest_indices][dist_mask].T  # (3, K)
-        W = (1 - (closest_distance[dist_mask] / max_distance)**2)**2
-        # W = 1 - closest_distance[dist_mask] / max_distance
+        Q1 = obs_pts[dist_mask].T  # (3, K)
+        P1 = rendered_pts[closest_indices][dist_mask].T  # (3, K)
+        W1 = (1 - (closest_distance[dist_mask] / max_distance)**2)**2
+
+        closest_distance, closest_indices = torch.min(distances, dim=0)  # find cooresponded obs pts for rendered pts
+        dist_mask = closest_distance < max_distance
+        Q2 = obs_pts[closest_indices][dist_mask].T
+        P2 = rendered_pts[dist_mask].T
+        W2 = (1 - (closest_distance[dist_mask] / max_distance)**2)**2
+
+        Q = torch.hstack([Q1, Q2])
+        P = torch.hstack([P1, P2])
+        W = torch.hstack([W1, W2])
 
         Q = Q.to(torch.float64)  # !!!
         P = P.to(torch.float64)  # !!!
@@ -939,6 +958,7 @@ if __name__ == '__main__':
         color_im = data[prefix]['color_im']
         depth_im = data[prefix]['depth_im']
         info = data[prefix]['info']
+        info['prefix'] = prefix
 
         tic = time.time()
         tracker.update(color_im, depth_im, info)

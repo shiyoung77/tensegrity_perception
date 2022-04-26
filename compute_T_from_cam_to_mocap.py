@@ -32,6 +32,7 @@ if __name__ == '__main__':
         positions[i] = np.load(os.path.join(pose_folder, f'{i}_pos.npy'))
 
     N = positions[0].shape[0]  # number of estimated frames
+    # N = 50
 
     Q = []
     P = []

@@ -45,6 +45,7 @@ def get_config(read_cfg=True):
     cfg['depth_scale'] = 4000
     cfg['num_rods'] = 3
     cfg['rod_length'] = 0.36
+    cfg['rod_diameter'] = 0.02
     cfg['rod_scale'] = 1
     cfg['depth_trunc'] = 3
     cfg['cable_length_scale'] = 1000
