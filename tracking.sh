@@ -1,7 +1,7 @@
 #!/bin/bash
 
 DATASET="dataset"
-VIDEO_ID="monday_roll15"
+VIDEO_ID="shiyang3"
 
 python tracking.py \
     --dataset $DATASET \
@@ -11,7 +11,9 @@ python tracking.py \
     --bottom_endcap_mesh_file "pcd/yale/end_cap_bottom_new.obj" \
     --start_frame 0 \
     --max_correspondence_distances 0.3 0.25 0.2 0.15 0.1 0.06 0.03 \
-    --add_fake_pts \
+    --add_dummy_points \
+    --num_dummy_points 50 \
+    --dummy_weights 0.5 \
     --filter_observed_pts \
     --add_constrained_optimization \
     --add_physical_constraints \

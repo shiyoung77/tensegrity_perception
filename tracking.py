@@ -181,11 +181,11 @@ class Tracker:
                 endcap_pcd = perception_utils.create_pcd(masked_depth_im, self.data_cfg['cam_intr'])
                 endcap_pts = torch.from_numpy(np.asarray(endcap_pcd.points))
 
-                # # filter observable endcap points by z coordinates
+                # filter observable endcap points by z coordinates
                 # if self.cfg.filter_observed_pts:
                 #     zs = endcap_pts[:, 2]
                 #     z_min = torch.sort(zs[zs > 0]).values[int(endcap_pts.shape[0] * 0.1)]
-                #     endcap_pts = endcap_pts[zs < z_min + 0.01]
+                #     endcap_pts = endcap_pts[zs < z_min + 0.03]
                 #     endcap_center = endcap_pts.mean(dim=0).numpy()
 
                 # filter observable endcap point cloud by finding the largest cluster
@@ -362,24 +362,30 @@ class Tracker:
                 mask[rendered_seg_gpu == u + 1] = True
                 mask[rendered_seg_gpu == v + 1] = True
                 rendered_pts = self.compute_obs_pts(rendered_depth_gpu, mask)
+                rendered_w = torch.ones(rendered_pts.shape[0]).cuda()
 
                 obs_pts = obs_pts_dict[color]
+                obs_w = torch.ones(obs_pts.shape[0]).cuda()
 
                 # filter observed points based on z coordinates
                 if self.cfg.filter_observed_pts:
                     u_obs_pts, v_obs_pts = self.filter_obs_pts(obs_pts, color, radius=max_distance, thresh=0.03)
                     obs_pts = torch.vstack([u_obs_pts, v_obs_pts])
+                    obs_w = torch.ones(obs_pts.shape[0]).cuda()
 
-                # add fake points at the previous endcap position
-                if self.cfg.add_fake_pts:
-                    fake_pts = np.stack([self.G.nodes[u]['pos_list'][-1], self.G.nodes[v]['pos_list'][-1]])
-                    fake_pts = torch.from_numpy(fake_pts).to(torch.float32).cuda()
-                    fake_pts = torch.tile(fake_pts, (50, 1))
-                    obs_pts = torch.vstack([obs_pts, fake_pts])
-                    rendered_pts = torch.vstack([rendered_pts, fake_pts])
+                # add dummy points at the previous endcap position
+                if self.cfg.add_dummy_points:
+                    dummy_pts = np.stack([self.G.nodes[u]['pos_list'][-1], self.G.nodes[v]['pos_list'][-1]])
+                    dummy_pts = torch.from_numpy(dummy_pts).to(torch.float32).cuda()
+                    dummy_pts = torch.tile(dummy_pts, (self.cfg.num_dummy_points, 1))
+                    obs_pts = torch.vstack([obs_pts, dummy_pts])
+                    obs_w = torch.hstack([obs_w, self.cfg.dummy_weights * torch.ones(dummy_pts.shape[0]).cuda()])
+                    rendered_pts = torch.vstack([rendered_pts, dummy_pts])
+                    rendered_w = torch.hstack([rendered_w, self.cfg.dummy_weights * torch.ones(dummy_pts.shape[0]).cuda()])
 
                 prev_pose = self.G.edges[u, v]['pose_list'][-1].copy()
-                rod_pose, Q, P = self.projective_icp_cuda(obs_pts, rendered_pts, prev_pose, max_distance=max_distance)
+                rod_pose, Q, P = self.projective_icp_cuda(obs_pts, rendered_pts, prev_pose, obs_w=obs_w, rendered_w=rendered_w,
+                                                          max_distance=max_distance)
 
                 if iter == 0:
                     self.G.edges[u, v]['pose_list'].append(rod_pose)
@@ -474,8 +480,7 @@ class Tracker:
         num_endcaps = 2 * self.data_cfg['num_rods']  # a rod has two end caps
 
         sensor_measurement = info['sensors']
-        sensor_status = info['sensor_status']
-        obj_func, jac_func = self.objective_function_generator(sensor_measurement, sensor_status)
+        obj_func, jac_func = self.objective_function_generator(sensor_measurement)
 
         init_values = np.zeros(3 * num_endcaps)
         for i in range(num_endcaps):
@@ -563,7 +568,7 @@ class Tracker:
             u_world_pos = R @ u_pos + t
             u_z = u_world_pos[2]
             return u_z - self.data_cfg['rod_diameter'] / 2
-        
+
         def jacobian_function(X):
             result = np.zeros_like(X)
             result[3 * u : 3 * u + 3] = R[2]
@@ -572,7 +577,7 @@ class Tracker:
         return constraint_function, jacobian_function
 
 
-    def objective_function_generator(self, sensor_measurement, sensor_status):
+    def objective_function_generator(self, sensor_measurement):
 
         def objective_function(X):
             unary_loss = 0
@@ -585,7 +590,7 @@ class Tracker:
             binary_loss = 0
             for sensor_id, (u, v) in self.data_cfg['sensor_to_tendon'].items():
                 sensor_id = str(sensor_id)
-                if not sensor_status[sensor_id] or sensor_measurement[sensor_id]['length'] <= 0:
+                if not self.data_cfg["sensor_status"][sensor_id] or sensor_measurement[sensor_id]['length'] <= 0:
                     continue
 
                 u_confidence = self.G.nodes[u].get('confidence', 1)
@@ -620,7 +625,7 @@ class Tracker:
 
             for sensor_id, (u, v) in self.data_cfg['sensor_to_tendon'].items():
                 sensor_id = str(sensor_id)
-                if not sensor_status[sensor_id] or sensor_measurement[sensor_id]['length'] <= 0:
+                if not self.data_cfg['sensor_status'][sensor_id] or sensor_measurement[sensor_id]['length'] <= 0:
                     continue
 
                 u_confidence = self.G.nodes[u].get('confidence', 1)
@@ -748,8 +753,15 @@ class Tracker:
         return curr_rod_pose
 
 
-    def projective_icp_cuda(self, obs_pts: torch.Tensor, rendered_pts: torch.Tensor,
-                            init_pose: np.ndarray, max_distance=0.02, verbose=False):
+    def projective_icp_cuda(self, obs_pts: torch.Tensor, rendered_pts: torch.Tensor, init_pose: np.ndarray,
+                            obs_w: torch.Tensor = None, rendered_w: torch.Tensor = None,
+                            max_distance=0.02, verbose=False):
+        N, M = obs_pts.shape[0], rendered_pts.shape[0]
+        if obs_w is None:
+            obs_w = torch.ones(N).cuda()
+        if rendered_w is None:
+            rendered_w = torch.ones(M).cuda()
+
         # ICP ref: https://www.youtube.com/watch?v=djnd502836w&t=781s
         # nearest neighbor data association
         distances = torch.norm(obs_pts.unsqueeze(1) - rendered_pts.unsqueeze(0), dim=2)  # (N, M)
@@ -759,12 +771,14 @@ class Tracker:
         Q1 = obs_pts[dist_mask].T  # (3, K)
         P1 = rendered_pts[closest_indices][dist_mask].T  # (3, K)
         W1 = (1 - (closest_distance[dist_mask] / max_distance)**2)**2
+        W1 *= obs_w[dist_mask] * rendered_w[closest_indices][dist_mask]
 
         closest_distance, closest_indices = torch.min(distances, dim=0)  # find cooresponded obs pts for rendered pts
         dist_mask = closest_distance < max_distance
         Q2 = obs_pts[closest_indices][dist_mask].T
         P2 = rendered_pts[dist_mask].T
         W2 = (1 - (closest_distance[dist_mask] / max_distance)**2)**2
+        W2 *= obs_w[closest_indices][dist_mask] * rendered_w[dist_mask]
 
         Q = torch.hstack([Q1, Q2])
         P = torch.hstack([P1, P2])
@@ -880,7 +894,9 @@ if __name__ == '__main__':
     parser.add_argument("--bottom_endcap_mesh_file", default="pcd/yale/end_cap_bottom_new.obj")
     parser.add_argument("--start_frame", default=0, type=int)
     parser.add_argument("--max_correspondence_distances", default=[0.3, 0.15, 0.1, 0.06, 0.03], type=float, nargs="+")
-    parser.add_argument("--add_fake_pts", action="store_true")
+    parser.add_argument("--add_dummy_points", action="store_true")
+    parser.add_argument("--num_dummy_points", type=int, default=50)
+    parser.add_argument("--dummy_weights", type=float, default=0.1)
     parser.add_argument("--filter_observed_pts", action="store_true")
     parser.add_argument("--add_constrained_optimization", action="store_true")
     parser.add_argument("--add_physical_constraints", action="store_true")
@@ -919,11 +935,6 @@ if __name__ == '__main__':
     with open(info_path, 'r') as f:
         info = json.load(f)
 
-    info['sensor_status'] = {key: True for key in info['sensors'].keys()}
-    # info['sensor_status']['6'] = False
-    # info['sensor_status']['7'] = False
-    # info['sensor_status']['8'] = False
-
     tracker.initialize(color_im, depth_im, info, compute_hsv=False)
     data_cfg_module.write_config(tracker.data_cfg)
 
@@ -951,17 +962,10 @@ if __name__ == '__main__':
         info_path = os.path.join(video_path, 'data', f'{prefix}.json')
         data[prefix] = dict()
 
-        # color_im = cv2.imread(color_path)
         color_im = cv2.cvtColor(cv2.imread(color_path), cv2.COLOR_BGR2RGB)
         depth_im = cv2.imread(depth_path, cv2.IMREAD_UNCHANGED).astype(np.float32) / data_cfg['depth_scale']
         with open(info_path, 'r') as f:
             info = json.load(f)
-
-        info['sensor_status'] = {key: True for key in info['sensors'].keys()}
-        # info['sensor_status']['6'] = False
-        # info['sensor_status']['7'] = False
-        # info['sensor_status']['8'] = False
-
         data[prefix]['color_im'] = color_im
         data[prefix]['depth_im'] = depth_im
         data[prefix]['info'] = info

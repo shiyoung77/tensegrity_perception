@@ -56,7 +56,6 @@ def get_config(read_cfg=True):
         'green': [2, 3],
         'blue': [4, 5]
     }
-    # same to pairs.csv
     cfg['sensor_to_tendon'] = {
         0: [3, 5],
         1: [1, 3],
@@ -67,6 +66,17 @@ def get_config(read_cfg=True):
         6: [2, 5],
         7: [0, 3],
         8: [1, 4]
+    }
+    cfg['sensor_status'] = {
+        0: True,
+        1: True,
+        2: True,
+        3: True,
+        4: True,
+        5: True,
+        6: True,
+        7: True,
+        8: True
     }
     return cfg
 
