@@ -358,10 +358,9 @@ class Tracker:
             # ================================== prediction step ==================================
             tic = time.time()
             for color, (u, v) in self.data_cfg['color_to_rod'].items():
-                mask = torch.zeros((H, W), dtype=torch.bool, device='cuda:0')
-                mask[rendered_seg_gpu == u + 1] = True
-                mask[rendered_seg_gpu == v + 1] = True
-                rendered_pts = self.compute_obs_pts(rendered_depth_gpu, mask)
+                u_rendered_pts = self.compute_obs_pts(rendered_depth_gpu, (rendered_seg_gpu == u + 1))
+                v_rendered_pts = self.compute_obs_pts(rendered_depth_gpu, (rendered_seg_gpu == v + 1))
+                rendered_pts = torch.vstack([u_rendered_pts, v_rendered_pts])
                 rendered_w = torch.ones(rendered_pts.shape[0]).cuda()
 
                 obs_pts = obs_pts_dict[color]
@@ -372,6 +371,8 @@ class Tracker:
                     u_obs_pts, v_obs_pts = self.filter_obs_pts(obs_pts, color, radius=max_distance, thresh=0.03)
                     obs_pts = torch.vstack([u_obs_pts, v_obs_pts])
                     obs_w = torch.ones(obs_pts.shape[0]).cuda()
+                else:
+                    u_obs_pts, v_obs_pts = self.filter_obs_pts(obs_pts, color, radius=max_distance, thresh=np.inf)
 
                 # add dummy points at the previous endcap position
                 if self.cfg.add_dummy_points:
@@ -395,18 +396,13 @@ class Tracker:
                     self.G.edges[u, v]['pose_list'][-1] = rod_pose
                     self.G.nodes[u]['pos_list'][-1] = rod_pose[:3, 3] + rod_pose[:3, 2] * self.rod_length / 2
                     self.G.nodes[v]['pos_list'][-1] = rod_pose[:3, 3] - rod_pose[:3, 2] * self.rod_length / 2
+
+                self.G.nodes[u]['confidence'] = self.compute_confidence(u_obs_pts, u_rendered_pts, num_thresh=50, inlier_thresh=0.02)
+                self.G.nodes[v]['confidence'] = self.compute_confidence(u_obs_pts, u_rendered_pts, num_thresh=50, inlier_thresh=0.02)
+
             # print(f"ICP takes {time.time() - tic}s")
 
             # ================================== correction step ==================================
-            # render final depth and segmentation image
-            # for mesh_node, T in zip(mesh_nodes, T_list):
-            #     scene.set_pose(mesh_node, m @ T)
-            # rendered_seg, rendered_depth = self.renderer.render(scene, flags=RenderFlags.SEG, seg_node_map=seg_node_map)
-            # rendered_seg = rendered_seg[:, :, 0].copy()
-
-            # confidence_u, confidence_v = self.compute_confidence(obs_depth_im, rendered_depth, rendered_seg,
-            #                                                      inlier_thresh=0.03)
-
             if self.cfg.add_constrained_optimization:
                 tic = time.time()
                 self.constrained_optimization(info)
@@ -452,27 +448,22 @@ class Tracker:
         return self.render_nodes(seg_node_map)
 
 
-    def compute_confidence(self, obs_depth_im, rendered_depth_im, rendered_seg_im, inlier_thresh=0.01):
-        seg_gpu = torch.from_numpy(rendered_seg_im).cuda()
-        obs_depth_gpu = torch.from_numpy(obs_depth_im).cuda()
-        rendered_depth_gpu = torch.from_numpy(rendered_depth_im).cuda()
+    def compute_confidence(self, obs_pts, rendered_pts, num_thresh=50, inlier_thresh=0.01):
+        N, M  = obs_pts.shape[0], rendered_pts.shape[0]
+        if N < num_thresh or M < num_thresh:
+            return 0
 
-        obs_pts, _ = self.back_projection(obs_depth_gpu)
-        rendered_pts, (r_ys, r_xs) = self.back_projection(rendered_depth_gpu)
-        pts_labels = seg_gpu[r_ys, r_xs]
-        rendered_u = torch.sum(pts_labels == 1).cpu().item()
-        rendered_v = torch.sum(pts_labels == 2).cpu().item()
-
-        # nearest neighbor data association
         distances = torch.norm(rendered_pts.unsqueeze(1) - obs_pts.unsqueeze(0), dim=2)  # (N, M)
-        closest_distance, closest_indices = torch.min(distances, dim=1)
-        dist_mask = closest_distance < inlier_thresh
+        tp = 0
 
-        # get inlier labels
-        matched_labels = pts_labels[dist_mask]
-        matched_u = torch.sum(matched_labels == 1).cpu().item()
-        matched_v = torch.sum(matched_labels == 2).cpu().item()
-        return max(0.1, matched_u / rendered_u), max(0.1, matched_v / rendered_v)
+        closest_distance, _ = torch.min(distances, dim=1)
+        tp += torch.sum(closest_distance < inlier_thresh)
+
+        closest_distance, _ = torch.min(distances, dim=0)
+        tp += torch.sum(closest_distance < inlier_thresh)
+
+        f1 = tp / (N + M)
+        return f1.item()
 
 
     def constrained_optimization(self, info):
@@ -584,7 +575,8 @@ class Tracker:
             for i in range(len(self.data_cfg['node_to_color'])):
                 pos = X[(3 * i):(3 * i + 3)]
                 estimated_pos = self.G.nodes[i]['pos_list'][-1]
-                confidence = self.G.nodes[i].get('confidence', 1)
+                # confidence = self.G.nodes[i].get('confidence', 1)
+                confidence = 1
                 unary_loss += confidence * np.sum((pos - estimated_pos)**2)
 
             binary_loss = 0
@@ -593,13 +585,13 @@ class Tracker:
                 if not self.data_cfg["sensor_status"][sensor_id] or sensor_measurement[sensor_id]['length'] <= 0:
                     continue
 
-                u_confidence = self.G.nodes[u].get('confidence', 1)
-                v_confidence = self.G.nodes[v].get('confidence', 1)
+                c_u = self.G.nodes[u].get('confidence', 1)
+                c_v = self.G.nodes[v].get('confidence', 1)
                 factor = 0.2
-                # if u_confidence > 0.5 and v_confidence > 0.5:
-                #     factor = 0
-                # if u_confidence < 0.2 or v_confidence <= 0.2:
-                #     factor = 1
+                if c_u > 0.5 and c_v > 0.5:
+                    factor = 0.1
+                # elif c_u > 0.2 and c_v > 0.2:
+                #     factor *= (1 - 0.5*(c_u + c_v))
 
                 u_pos = X[(3 * u):(3 * u + 3)]
                 v_pos = X[(3 * v):(3 * v + 3)]
@@ -620,7 +612,8 @@ class Tracker:
             for i in range(len(self.data_cfg['node_to_color'])):
                 x_hat, y_hat, z_hat = self.G.nodes[i]['pos_list'][-1]
                 x, y, z = X[3*i : 3*i + 3]
-                confidence = self.G.nodes[i].get('confidence', 1)
+                # confidence = self.G.nodes[i].get('confidence', 1)
+                confidence = 1
                 result[3*i : 3*i + 3] = 2*confidence*np.array([x - x_hat, y - y_hat, z - z_hat])
 
             for sensor_id, (u, v) in self.data_cfg['sensor_to_tendon'].items():
@@ -628,13 +621,13 @@ class Tracker:
                 if not self.data_cfg['sensor_status'][sensor_id] or sensor_measurement[sensor_id]['length'] <= 0:
                     continue
 
-                u_confidence = self.G.nodes[u].get('confidence', 1)
-                v_confidence = self.G.nodes[v].get('confidence', 1)
+                c_u = self.G.nodes[u].get('confidence', 1)
+                c_v = self.G.nodes[v].get('confidence', 1)
                 factor = 0.2
-                # if u_confidence > 0.5 and v_confidence > 0.5:
-                #     factor = 0
-                # if u_confidence < 0.2 or v_confidence <= 0.2:
-                #     factor = 1
+                if c_u > 0.5 and c_v > 0.5:
+                    factor = 0.1
+                # elif c_u > 0.2 and c_v > 0.2:
+                #     factor *= (1 - 0.5*(c_u + c_v))
 
                 u_x, u_y, u_z = X[(3 * u):(3 * u + 3)]
                 v_x, v_y, v_z = X[(3 * v):(3 * v + 3)]
