@@ -45,13 +45,12 @@ class Tracker:
 
         # set up pyrender scene
         H, W = self.data_cfg['im_h'], self.data_cfg['im_w']
-        self.render_scale = 2
-        self.renderer = pyrender.OffscreenRenderer(W // self.render_scale, H // self.render_scale)
+        self.renderer = pyrender.OffscreenRenderer(W // self.cfg.render_scale, H // self.cfg.render_scale)
         cam_intr = np.asarray(self.data_cfg['cam_intr'])
-        fx = cam_intr[0, 0] / self.render_scale
-        fy = cam_intr[1, 1] / self.render_scale
-        cx = cam_intr[0, 2] / self.render_scale
-        cy = cam_intr[1, 2] / self.render_scale
+        fx = cam_intr[0, 0] / self.cfg.render_scale
+        fy = cam_intr[1, 1] / self.cfg.render_scale
+        cx = cam_intr[0, 2] / self.cfg.render_scale
+        cy = cam_intr[1, 2] / self.cfg.render_scale
         camera = pyrender.IntrinsicsCamera(fx=fx, fy=fy, cx=cx, cy=cy)
         light = pyrender.SpotLight(color=np.ones(3), intensity=3.0, innerConeAngle=np.pi / 16.0)
         camera_node = pyrender.Node(name='cam', camera=camera, matrix=np.eye(4))
@@ -425,7 +424,7 @@ class Tracker:
         for node in seg_node_map:
             self.render_scene.add_node(node)
 
-        scale = self.render_scale
+        scale = self.cfg.render_scale
         if depth_only:
             rendered_depth = self.renderer.render(self.render_scene, flags=RenderFlags.DEPTH_ONLY)
             for node in seg_node_map:
@@ -896,6 +895,7 @@ if __name__ == '__main__':
     parser.add_argument("--bottom_endcap_mesh_file", default="pcd/yale/end_cap_bottom_new.obj")
     parser.add_argument("--start_frame", default=0, type=int)
     parser.add_argument("--end_frame", default=1000, type=int)
+    parser.add_argument("--render_scale", default=2, type=int)
     parser.add_argument("--max_correspondence_distances", default=[0.3, 0.15, 0.1, 0.06, 0.03], type=float, nargs="+")
     parser.add_argument("--add_dummy_points", action="store_true")
     parser.add_argument("--num_dummy_points", type=int, default=50)
@@ -952,7 +952,7 @@ if __name__ == '__main__':
             vis_im[depth_im < mask] = Tracker.ColorDict[color]
         cv2.imshow("estimation", cv2.cvtColor(vis_im, cv2.COLOR_RGB2BGR))
         key = cv2.waitKey(0)
-    
+
     end_frame = min(len(prefixes), args.end_frame)
 
     data = dict()
