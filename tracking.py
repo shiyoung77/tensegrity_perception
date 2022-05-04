@@ -368,7 +368,7 @@ class Tracker:
 
                 # filter observed points based on z coordinates
                 if self.cfg.filter_observed_pts:
-                    u_obs_pts, v_obs_pts = self.filter_obs_pts(obs_pts, color, radius=max_distance, thresh=0.03)
+                    u_obs_pts, v_obs_pts = self.filter_obs_pts(obs_pts, color, radius=max_distance, thresh=0.015)
                     obs_pts = torch.vstack([u_obs_pts, v_obs_pts])
                     obs_w = torch.ones(obs_pts.shape[0]).cuda()
                 else:
@@ -956,7 +956,7 @@ if __name__ == '__main__':
     end_frame = min(len(prefixes), args.end_frame)
 
     data = dict()
-    for idx in tqdm(range(args.start_frame + 1, end_frame)):
+    for idx in tqdm(range(args.start_frame, end_frame)):
         prefix = prefixes[idx]
         color_path = os.path.join(video_path, 'color', f'{prefix}.png')
         depth_path = os.path.join(video_path, 'depth', f'{prefix}.png')
@@ -973,7 +973,7 @@ if __name__ == '__main__':
 
     os.makedirs(os.path.join(video_path, "estimation_cloud"), exist_ok=True)
 
-    for idx in tqdm(range(args.start_frame + 1, end_frame)):
+    for idx in tqdm(range(args.start_frame, end_frame)):
         prefix = prefixes[idx]
         color_im = data[prefix]['color_im']
         depth_im = data[prefix]['depth_im']
@@ -1031,6 +1031,6 @@ if __name__ == '__main__':
     pose_output_folder = os.path.join(video_path, "poses")
     os.makedirs(pose_output_folder, exist_ok=True)
     for color, (u, v) in tracker.data_cfg['color_to_rod'].items():
-        np.save(os.path.join(pose_output_folder, f'{color}.npy'), np.array(tracker.G.edges[u, v]['pose_list']))
-        np.save(os.path.join(pose_output_folder, f'{u}_pos.npy'), np.array(tracker.G.nodes[u]['pos_list']))
-        np.save(os.path.join(pose_output_folder, f'{v}_pos.npy'), np.array(tracker.G.nodes[v]['pos_list']))
+        np.save(os.path.join(pose_output_folder, f'{color}.npy'), np.array(tracker.G.edges[u, v]['pose_list'])[1:])
+        np.save(os.path.join(pose_output_folder, f'{u}_pos.npy'), np.array(tracker.G.nodes[u]['pos_list'])[1:])
+        np.save(os.path.join(pose_output_folder, f'{v}_pos.npy'), np.array(tracker.G.nodes[v]['pos_list'])[1:])
