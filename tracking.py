@@ -45,12 +45,13 @@ class Tracker:
 
         # set up pyrender scene
         H, W = self.data_cfg['im_h'], self.data_cfg['im_w']
-        self.renderer = pyrender.OffscreenRenderer(W, H)
+        self.render_scale = 2
+        self.renderer = pyrender.OffscreenRenderer(W // self.render_scale, H // self.render_scale)
         cam_intr = np.asarray(self.data_cfg['cam_intr'])
-        fx = cam_intr[0, 0]
-        fy = cam_intr[1, 1]
-        cx = cam_intr[0, 2]
-        cy = cam_intr[1, 2]
+        fx = cam_intr[0, 0] / self.render_scale
+        fy = cam_intr[1, 1] / self.render_scale
+        cx = cam_intr[0, 2] / self.render_scale
+        cy = cam_intr[1, 2] / self.render_scale
         camera = pyrender.IntrinsicsCamera(fx=fx, fy=fy, cx=cx, cy=cy)
         light = pyrender.SpotLight(color=np.ones(3), intensity=3.0, innerConeAngle=np.pi / 16.0)
         camera_node = pyrender.Node(name='cam', camera=camera, matrix=np.eye(4))
@@ -424,10 +425,14 @@ class Tracker:
         for node in seg_node_map:
             self.render_scene.add_node(node)
 
+        scale = self.render_scale
         if depth_only:
             rendered_depth = self.renderer.render(self.render_scene, flags=RenderFlags.DEPTH_ONLY)
             for node in seg_node_map:
                 self.render_scene.remove_node(node)
+            if scale != 1:
+                H, W = rendered_depth.shape
+                rendered_depth = cv2.resize(rendered_depth, (W*scale, H*scale), interpolation=cv2.INTER_NEAREST)
             return rendered_depth
 
         rendered_seg, rendered_depth = self.renderer.render(self.render_scene, flags=RenderFlags.SEG,
@@ -435,6 +440,10 @@ class Tracker:
         rendered_seg = np.copy(rendered_seg[:, :, 0])
         for node in seg_node_map:
             self.render_scene.remove_node(node)
+        if scale != 1:
+            H, W = rendered_depth.shape
+            rendered_depth = cv2.resize(rendered_depth, (W*scale, H*scale), interpolation=cv2.INTER_NEAREST)
+            rendered_seg = cv2.resize(rendered_seg, (W*scale, H*scale), interpolation=cv2.INTER_NEAREST)
         return rendered_seg, rendered_depth
 
 
