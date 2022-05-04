@@ -22,6 +22,7 @@ if __name__ == '__main__':
     parser.add_argument("--dataset", default="dataset")
     parser.add_argument("-v", "--video", default="monday_roll15")
     parser.add_argument("--start_frame", default=0, type=int)
+    parser.add_argument("--end_frame", default=1000, type=int)
     parser.add_argument("--num_endcaps", default=6, type=int)
     parser.add_argument("--mocap_scale", default=1000, type=int, help="scale of measured position (mm by default)")
     args = parser.parse_args()
@@ -31,9 +32,7 @@ if __name__ == '__main__':
     for i in range(args.num_endcaps):
         positions[i] = np.load(os.path.join(pose_folder, f'{i}_pos.npy'))
 
-    N = positions[0].shape[0]  # number of estimated frames
-    # N = 50
-
+    N = min(positions[0].shape[0], args.end_frame)
     Q = []
     P = []
     for i in range(N):

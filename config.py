@@ -68,15 +68,15 @@ def get_config(read_cfg=True):
         8: [1, 4]
     }
     cfg['sensor_status'] = {
-        0: True,
-        1: True,
-        2: True,
-        3: True,
-        4: True,
-        5: True,
-        6: True,
-        7: True,
-        8: True
+        '0': True,
+        '1': True,
+        '2': True,
+        '3': True,
+        '4': True,
+        '5': True,
+        '6': True,
+        '7': True,
+        '8': True
     }
     return cfg
 

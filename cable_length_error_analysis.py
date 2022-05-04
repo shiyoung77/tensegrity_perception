@@ -14,6 +14,7 @@ if __name__ == '__main__':
     parser.add_argument("--dataset", default="dataset")
     parser.add_argument("-v", "--video", default="monday_roll15")
     parser.add_argument("--start_frame", default=0, type=int)
+    parser.add_argument("--end_frame", default=1000, type=int)
     parser.add_argument("--num_endcaps", default=6, type=int)
     parser.add_argument("--pose_folder", default="poses", type=str)
     parser.add_argument("--mocap_scale", default=1000, type=int, help="scale of measured position (mm by default)")
@@ -26,7 +27,7 @@ if __name__ == '__main__':
     for i in range(len(data_cfg['node_to_color'])):
         pos_dict[i] = np.load(os.path.join(args.dataset, args.video, args.pose_folder, f'{i}_pos.npy'))
 
-    N = pos_dict[0].shape[0]
+    N = min(pos_dict[0].shape[0], args.end_frame)
 
     predicted_dist = defaultdict(list)
     measured_dist = defaultdict(list)

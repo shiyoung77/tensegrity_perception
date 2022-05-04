@@ -183,19 +183,19 @@ class Tracker:
                 endcap_pts = torch.from_numpy(np.asarray(endcap_pcd.points))
 
                 # filter observable endcap points by z coordinates
-                # if self.cfg.filter_observed_pts:
-                #     zs = endcap_pts[:, 2]
-                #     z_min = torch.sort(zs[zs > 0]).values[int(endcap_pts.shape[0] * 0.1)]
-                #     endcap_pts = endcap_pts[zs < z_min + 0.03]
-                #     endcap_center = endcap_pts.mean(dim=0).numpy()
+                if self.cfg.filter_observed_pts:
+                    zs = endcap_pts[:, 2]
+                    z_min = torch.sort(zs[zs > 0]).values[int(endcap_pts.shape[0] * 0.1)]
+                    endcap_pts = endcap_pts[zs < z_min + 0.02]
+                    endcap_center = endcap_pts.mean(dim=0).numpy()
 
                 # filter observable endcap point cloud by finding the largest cluster
-                labels = np.asarray(endcap_pcd.cluster_dbscan(eps=0.005, min_points=1, print_progress=False))
-                points_for_each_cluster = [(labels == label).sum() for label in range(labels.max() + 1)]
-                label = np.argmax(points_for_each_cluster)
-                masked_indices = np.where(labels == label)[0]
-                endcap_pcd = endcap_pcd.select_by_index(masked_indices)
-                endcap_center = np.asarray(endcap_pcd.points).mean(axis=0)
+                # labels = np.asarray(endcap_pcd.cluster_dbscan(eps=0.005, min_points=1, print_progress=False))
+                # points_for_each_cluster = [(labels == label).sum() for label in range(labels.max() + 1)]
+                # label = np.argmax(points_for_each_cluster)
+                # masked_indices = np.where(labels == label)[0]
+                # endcap_pcd = endcap_pcd.select_by_index(masked_indices)
+                # endcap_center = np.asarray(endcap_pcd.points).mean(axis=0)
 
                 endcap_centers.append(endcap_center)
                 obs_pts.append(endcap_pts)
@@ -289,7 +289,7 @@ class Tracker:
 
     def filter_obs_pts(self, obs_pts, color, radius=0.1, thresh=0.01):
         if obs_pts.shape[0] < 10:
-            return obs_pts
+            return obs_pts, obs_pts
 
         dist_dict = dict()
         u, v = self.data_cfg['color_to_rod'][color]
@@ -895,6 +895,7 @@ if __name__ == '__main__':
     parser.add_argument("--top_endcap_mesh_file", default="pcd/yale/end_cap_top_new.obj")
     parser.add_argument("--bottom_endcap_mesh_file", default="pcd/yale/end_cap_bottom_new.obj")
     parser.add_argument("--start_frame", default=0, type=int)
+    parser.add_argument("--end_frame", default=1000, type=int)
     parser.add_argument("--max_correspondence_distances", default=[0.3, 0.15, 0.1, 0.06, 0.03], type=float, nargs="+")
     parser.add_argument("--add_dummy_points", action="store_true")
     parser.add_argument("--num_dummy_points", type=int, default=50)
@@ -940,10 +941,6 @@ if __name__ == '__main__':
     tracker.initialize(color_im, depth_im, info, compute_hsv=False)
     data_cfg_module.write_config(tracker.data_cfg)
 
-    # track frames
-    os.makedirs(os.path.join(video_path, "scene_cloud"), exist_ok=True)
-    os.makedirs(os.path.join(video_path, "estimation_cloud"), exist_ok=True)
-
     if args.visualize:
         cv2.namedWindow("estimation")
         cv2.moveWindow("estimation", 800, 100)
@@ -955,9 +952,11 @@ if __name__ == '__main__':
             vis_im[depth_im < mask] = Tracker.ColorDict[color]
         cv2.imshow("estimation", cv2.cvtColor(vis_im, cv2.COLOR_RGB2BGR))
         key = cv2.waitKey(0)
+    
+    end_frame = min(len(prefixes), args.end_frame)
 
     data = dict()
-    for idx in tqdm(range(args.start_frame + 1, len(prefixes))):
+    for idx in tqdm(range(args.start_frame + 1, end_frame)):
         prefix = prefixes[idx]
         color_path = os.path.join(video_path, 'color', f'{prefix}.png')
         depth_path = os.path.join(video_path, 'depth', f'{prefix}.png')
@@ -972,7 +971,9 @@ if __name__ == '__main__':
         data[prefix]['depth_im'] = depth_im
         data[prefix]['info'] = info
 
-    for idx in tqdm(range(args.start_frame + 1, len(prefixes))):
+    os.makedirs(os.path.join(video_path, "estimation_cloud"), exist_ok=True)
+
+    for idx in tqdm(range(args.start_frame + 1, end_frame)):
         prefix = prefixes[idx]
         color_im = data[prefix]['color_im']
         depth_im = data[prefix]['depth_im']
