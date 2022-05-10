@@ -13,6 +13,7 @@ python tracking.py \
     --bottom_endcap_mesh_file "pcd/yale/end_cap_bottom_new.obj" \
     --start_frame $START_FRAME \
     --end_frame $END_FRAME \
+    --render_scale 2 \
     --max_correspondence_distances 0.3 0.25 0.2 0.15 0.1 0.06 0.03 \
     --add_dummy_points \
     --num_dummy_points 50 \

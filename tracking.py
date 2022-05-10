@@ -45,12 +45,12 @@ class Tracker:
 
         # set up pyrender scene
         H, W = self.data_cfg['im_h'], self.data_cfg['im_w']
-        self.renderer = pyrender.OffscreenRenderer(W, H)
+        self.renderer = pyrender.OffscreenRenderer(W // self.cfg.render_scale, H // self.cfg.render_scale)
         cam_intr = np.asarray(self.data_cfg['cam_intr'])
-        fx = cam_intr[0, 0]
-        fy = cam_intr[1, 1]
-        cx = cam_intr[0, 2]
-        cy = cam_intr[1, 2]
+        fx = cam_intr[0, 0] / self.cfg.render_scale
+        fy = cam_intr[1, 1] / self.cfg.render_scale
+        cx = cam_intr[0, 2] / self.cfg.render_scale
+        cy = cam_intr[1, 2] / self.cfg.render_scale
         camera = pyrender.IntrinsicsCamera(fx=fx, fy=fy, cx=cx, cy=cy)
         light = pyrender.SpotLight(color=np.ones(3), intensity=3.0, innerConeAngle=np.pi / 16.0)
         camera_node = pyrender.Node(name='cam', camera=camera, matrix=np.eye(4))
@@ -368,7 +368,7 @@ class Tracker:
 
                 # filter observed points based on z coordinates
                 if self.cfg.filter_observed_pts:
-                    u_obs_pts, v_obs_pts = self.filter_obs_pts(obs_pts, color, radius=max_distance, thresh=0.03)
+                    u_obs_pts, v_obs_pts = self.filter_obs_pts(obs_pts, color, radius=max_distance, thresh=0.015)
                     obs_pts = torch.vstack([u_obs_pts, v_obs_pts])
                     obs_w = torch.ones(obs_pts.shape[0]).cuda()
                 else:
@@ -424,10 +424,14 @@ class Tracker:
         for node in seg_node_map:
             self.render_scene.add_node(node)
 
+        scale = self.cfg.render_scale
         if depth_only:
             rendered_depth = self.renderer.render(self.render_scene, flags=RenderFlags.DEPTH_ONLY)
             for node in seg_node_map:
                 self.render_scene.remove_node(node)
+            if scale != 1:
+                H, W = rendered_depth.shape
+                rendered_depth = cv2.resize(rendered_depth, (W*scale, H*scale), interpolation=cv2.INTER_NEAREST)
             return rendered_depth
 
         rendered_seg, rendered_depth = self.renderer.render(self.render_scene, flags=RenderFlags.SEG,
@@ -435,6 +439,10 @@ class Tracker:
         rendered_seg = np.copy(rendered_seg[:, :, 0])
         for node in seg_node_map:
             self.render_scene.remove_node(node)
+        if scale != 1:
+            H, W = rendered_depth.shape
+            rendered_depth = cv2.resize(rendered_depth, (W*scale, H*scale), interpolation=cv2.INTER_NEAREST)
+            rendered_seg = cv2.resize(rendered_seg, (W*scale, H*scale), interpolation=cv2.INTER_NEAREST)
         return rendered_seg, rendered_depth
 
 
@@ -887,6 +895,7 @@ if __name__ == '__main__':
     parser.add_argument("--bottom_endcap_mesh_file", default="pcd/yale/end_cap_bottom_new.obj")
     parser.add_argument("--start_frame", default=0, type=int)
     parser.add_argument("--end_frame", default=1000, type=int)
+    parser.add_argument("--render_scale", default=2, type=int)
     parser.add_argument("--max_correspondence_distances", default=[0.3, 0.15, 0.1, 0.06, 0.03], type=float, nargs="+")
     parser.add_argument("--add_dummy_points", action="store_true")
     parser.add_argument("--num_dummy_points", type=int, default=50)
@@ -943,11 +952,11 @@ if __name__ == '__main__':
             vis_im[depth_im < mask] = Tracker.ColorDict[color]
         cv2.imshow("estimation", cv2.cvtColor(vis_im, cv2.COLOR_RGB2BGR))
         key = cv2.waitKey(0)
-    
+
     end_frame = min(len(prefixes), args.end_frame)
 
     data = dict()
-    for idx in tqdm(range(args.start_frame + 1, end_frame)):
+    for idx in tqdm(range(args.start_frame, end_frame)):
         prefix = prefixes[idx]
         color_path = os.path.join(video_path, 'color', f'{prefix}.png')
         depth_path = os.path.join(video_path, 'depth', f'{prefix}.png')
@@ -964,7 +973,7 @@ if __name__ == '__main__':
 
     os.makedirs(os.path.join(video_path, "estimation_cloud"), exist_ok=True)
 
-    for idx in tqdm(range(args.start_frame + 1, end_frame)):
+    for idx in tqdm(range(args.start_frame, end_frame)):
         prefix = prefixes[idx]
         color_im = data[prefix]['color_im']
         depth_im = data[prefix]['depth_im']
@@ -1022,6 +1031,6 @@ if __name__ == '__main__':
     pose_output_folder = os.path.join(video_path, "poses")
     os.makedirs(pose_output_folder, exist_ok=True)
     for color, (u, v) in tracker.data_cfg['color_to_rod'].items():
-        np.save(os.path.join(pose_output_folder, f'{color}.npy'), np.array(tracker.G.edges[u, v]['pose_list']))
-        np.save(os.path.join(pose_output_folder, f'{u}_pos.npy'), np.array(tracker.G.nodes[u]['pos_list']))
-        np.save(os.path.join(pose_output_folder, f'{v}_pos.npy'), np.array(tracker.G.nodes[v]['pos_list']))
+        np.save(os.path.join(pose_output_folder, f'{color}.npy'), np.array(tracker.G.edges[u, v]['pose_list'])[1:])
+        np.save(os.path.join(pose_output_folder, f'{u}_pos.npy'), np.array(tracker.G.nodes[u]['pos_list'])[1:])
+        np.save(os.path.join(pose_output_folder, f'{v}_pos.npy'), np.array(tracker.G.nodes[v]['pos_list'])[1:])
