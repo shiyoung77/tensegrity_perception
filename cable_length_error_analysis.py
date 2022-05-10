@@ -63,27 +63,32 @@ if __name__ == '__main__':
             measured_errors[sensor_id].append(np.abs(mocap_dist[sensor_id][-1] - measured_dist[sensor_id][-1])*100)
             predicted_errors[sensor_id].append(np.abs(mocap_dist[sensor_id][-1] - predicted_dist[sensor_id][-1])*100)
 
-    os.makedirs(os.path.join(args.dataset, args.video, "error_analysis"), exist_ok=True)
-
-    fig, axes = plt.subplots(3, 3)
-    fig.set_size_inches(16, 12)
-    fig.suptitle(f"Cable Length Plot")
-    for sensor_id in data_cfg['sensor_to_tendon']:
-        row = int(sensor_id) // 3
-        col = int(sensor_id) % 3
-        axes[row, col].plot(range(N), np.array(predicted_dist[sensor_id])*100, label=f'{sensor_id}-predicted')
-        axes[row, col].plot(range(N), np.array(measured_dist[sensor_id])*100, label=f'{sensor_id}-measured')
-        axes[row, col].plot(range(N), np.array(mocap_dist[sensor_id])*100, label=f'{sensor_id}-mocap')
-        axes[row, col].legend(loc='best')
-        axes[row, col].set_xlabel("frame id")
-        axes[row, col].set_ylabel("distance (cm)")
-    plt.subplots_adjust(hspace=0.5)
-    plt.savefig(os.path.join(args.dataset, args.video, "error_analysis", "cable_length.png"), dpi=150)
-
     predicted_errors_stacked = np.hstack(list(predicted_errors.values()))
     measured_errors_stacked = np.hstack(list(measured_errors.values()))
     pred_mean_err = np.nanmean(predicted_errors_stacked)
     measured_mean_err = np.nanmean(measured_errors_stacked)
+    pred_std_err = np.nanstd(predicted_errors_stacked)
+    measured_std_err = np.nanstd(measured_errors_stacked)
+
+    os.makedirs(os.path.join(args.dataset, args.video, "error_analysis"), exist_ok=True)
+
+    fig, axes = plt.subplots(3, 3)
+    fig.set_size_inches(16, 12)
+    fig.suptitle(f"Plot of Distance between Endcaps for Video: {args.video}\n\n"
+                 f"Error by proposed method): mean {pred_mean_err:.1f}(cm), std {pred_std_err:.1f}(cm)\n"
+                 f"Error by stretch sensor): mean {measured_mean_err:.1f}(cm), std {measured_std_err:.1f}(cm)")
+    for sensor_id in data_cfg['sensor_to_tendon']:
+        row = int(sensor_id) // 3
+        col = int(sensor_id) % 3
+        axes[row, col].plot(range(N), np.array(predicted_dist[sensor_id])*100, label=f'{sensor_id}-Predicted')
+        axes[row, col].plot(range(N), np.array(measured_dist[sensor_id])*100, label=f'{sensor_id}-Measured')
+        axes[row, col].plot(range(N), np.array(mocap_dist[sensor_id])*100, label=f'{sensor_id}-GT')
+        axes[row, col].legend(loc='best')
+        axes[row, col].set_xlabel("Frame Index")
+        axes[row, col].set_ylabel("Distance (cm)")
+        axes[row, col].set_title(f"Sensor ID: {sensor_id}")
+    plt.subplots_adjust(wspace=0.3, hspace=0.4)
+    plt.savefig(os.path.join(args.dataset, args.video, "error_analysis", "cable_length.png"), dpi=150)
 
     fig, axes = plt.subplots(3, 3)
     fig.set_size_inches(16, 12)
