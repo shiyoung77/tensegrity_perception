@@ -17,17 +17,9 @@ import numpy as np
 
 from perception_utils import kabsch
 
-if __name__ == '__main__':
-    parser = ArgumentParser("pose evalutation")
-    parser.add_argument("--dataset", default="dataset")
-    parser.add_argument("-v", "--video", default="monday_roll15")
-    parser.add_argument("--start_frame", default=0, type=int)
-    parser.add_argument("--end_frame", default=1000, type=int)
-    parser.add_argument("--num_endcaps", default=6, type=int)
-    parser.add_argument("--mocap_scale", default=1000, type=int, help="scale of measured position (mm by default)")
-    args = parser.parse_args()
 
-    pose_folder = os.path.join(args.dataset, args.video, 'poses')
+def compute_extrinsic(args, video, method):
+    pose_folder = os.path.join(args.dataset, video, f'poses-{method}')
     positions = dict()
     for i in range(args.num_endcaps):
         positions[i] = np.load(os.path.join(pose_folder, f'{i}_pos.npy'))
@@ -36,7 +28,7 @@ if __name__ == '__main__':
     Q = []
     P = []
     for i in range(N):
-        info_path = os.path.join(args.dataset, args.video, 'data', f"{i + args.start_frame:04d}.json")
+        info_path = os.path.join(args.dataset, video, 'data', f"{i + args.start_frame:04d}.json")
         with open(info_path, 'r') as f:
             info = json.load(f)
 
@@ -58,7 +50,21 @@ if __name__ == '__main__':
     Q = np.array(Q).T  # (3, num_endcaps * N)
     P = np.array(P).T  # (3, num_endcaps * N)
     T = kabsch(Q, P)
+    return T
 
+
+if __name__ == '__main__':
+    parser = ArgumentParser("pose evalutation")
+    parser.add_argument("--dataset", default="dataset")
+    parser.add_argument("-v", "--video", default="monday_roll15")
+    parser.add_argument("--method", default="proposed")
+    parser.add_argument("--start_frame", default=0, type=int)
+    parser.add_argument("--end_frame", default=1000, type=int)
+    parser.add_argument("--num_endcaps", default=6, type=int)
+    parser.add_argument("--mocap_scale", default=1000, type=int, help="scale of measured position (mm by default)")
+    args = parser.parse_args()
+
+    T = compute_extrinsic(args, args.dataset, args.video, args.method)
     output_path = os.path.join(args.dataset, args.video, 'cam_to_mocap.npy')
     np.save(output_path, T)
     print(T)

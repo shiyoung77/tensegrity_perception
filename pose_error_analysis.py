@@ -18,6 +18,7 @@ if __name__ == '__main__':
     parser = ArgumentParser("pose evalutation")
     parser.add_argument("--dataset", default="dataset")
     parser.add_argument("-v", "--video", default="monday_roll15")
+    parser.add_argument("--method", default="proposed")
     parser.add_argument("--start_frame", default=0, type=int)
     parser.add_argument("--end_frame", default=1000, type=int)
     parser.add_argument("--num_endcaps", default=6, type=int)
@@ -28,10 +29,9 @@ if __name__ == '__main__':
     data_cfg_module = importlib.import_module(f'{args.dataset}.{args.video}.config')
     data_cfg = data_cfg_module.get_config(read_cfg=True)
 
-    pose_folder = os.path.join(args.dataset, args.video, 'poses')
     positions = dict()
     for i in range(args.num_endcaps):
-        positions[i] = np.load(os.path.join(pose_folder, f'{i}_pos.npy'))
+        positions[i] = np.load(os.path.join(args.dataset, args.video, f'poses-{args.method}', f'{i}_pos.npy'))
 
     num_rods = len(data_cfg['color_to_rod'])
     N = min(positions[0].shape[0], args.end_frame)

@@ -38,6 +38,8 @@ if __name__ == '__main__':
                 counter[u] += 1
             if info['mocap'][str(v)] is not None:
                 counter[v] += 1
+            if info['mocap'][str(u)] is not None and info['mocap'][str(v)] is not None:
+                counter[color] += 1
 
         for sensor_id, (u, v) in data_cfg['sensor_to_tendon'].items():
             if info['mocap'][str(u)] is not None and info['mocap'][str(v)] is not None:

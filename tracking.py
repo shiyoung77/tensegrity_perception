@@ -151,6 +151,15 @@ class Tracker:
         complete_obs_depth = np.zeros_like(depth_im)
         complete_obs_mask = np.zeros((H, W), dtype=np.bool8)
 
+        # if self.cfg.visualize:
+        #     hsv_im = cv2.cvtColor(color_im, cv2.COLOR_RGB2HSV)
+        #     _, axes = plt.subplots(2, 2)
+        #     axes[0, 0].imshow(color_im)
+        #     axes[0, 1].imshow(complete_obs_color)
+        #     axes[1, 0].imshow(hsv_im)
+        #     axes[1, 1].imshow(complete_obs_depth)
+        #     plt.show()
+
         # vis_rendered_pts = []
         # vis_obs_pts = []
 
@@ -339,8 +348,9 @@ class Tracker:
             elif color == 'blue':
                 obs_vis[:, :, 0][hsv_mask] = 255
         self.curr_obs_im = obs_vis
-        # cv2.imshow("obs", obs_vis)
         # print(f"color filter takes: {time.time() - tic}s")
+        if self.cfg.visualize:
+            cv2.imshow("obs", obs_vis)
 
         for iter, max_distance in enumerate(self.cfg.max_correspondence_distances):
             tic = time.time()
@@ -400,7 +410,7 @@ class Tracker:
                 self.G.nodes[u]['confidence'] = self.compute_confidence(u_obs_pts, u_rendered_pts, num_thresh=50, inlier_thresh=0.02)
                 self.G.nodes[v]['confidence'] = self.compute_confidence(u_obs_pts, u_rendered_pts, num_thresh=50, inlier_thresh=0.02)
 
-            # print(f"ICP takes {time.time() - tic}s")
+            # print(f"point registration takes {time.time() - tic}s")
 
             # ================================== correction step ==================================
             if self.cfg.add_constrained_optimization:
@@ -495,24 +505,6 @@ class Tracker:
             constraint['fun'], constraint['jac'] = self.endcap_constraint_generator(u, v, rod_length)
             constraints.append(constraint)
 
-        # Add constraints between the lowest node and the ground (assuming quasi-static)
-        # cam_to_world = la.inv(self.data_cfg['cam_extr'])
-        # R = cam_to_world[:3, :3]
-        # t = cam_to_world[:3, 3]
-        # for _, (u, v) in self.data_cfg['color_to_rod'].items():
-        #     u_prev_pos = self.G.nodes[u]['pos_list'][-1]
-        #     v_prev_pos = self.G.nodes[v]['pos_list'][-1]
-        #     u_prev_world_pos = R @ u_prev_pos + t
-        #     v_prev_world_pos = R @ v_prev_pos + t
-        #     u_z = u_prev_world_pos[2]
-        #     v_z = v_prev_world_pos[2]
-        #     ground_node = u if u_z < v_z else v
-
-        #     constraint = dict()
-        #     constraint['type'] = 'eq'
-        #     constraint['fun'] = self.ground_constraint_generator(ground_node)
-        #     constraints.append(constraint)  # comment this if doesn't work
-
         if self.cfg.add_ground_constraints:
             for u in range(len(self.data_cfg['node_to_color'])):
                 constraint = dict()
@@ -539,7 +531,8 @@ class Tracker:
                     constraints.append(constraint)
 
         res = minimize(obj_func, init_values, jac=jac_func, method='SLSQP', constraints=constraints)
-        assert res.success, "Optimization fail! Something must be wrong."
+        if not res.success:
+            print("Joint optimization fail! Something must be wrong.")
 
         for i in range(num_endcaps):
             # sanity check in case the constraint optimization fails
@@ -595,11 +588,11 @@ class Tracker:
 
                 c_u = self.G.nodes[u].get('confidence', 1)
                 c_v = self.G.nodes[v].get('confidence', 1)
-                factor = 0.2
+                factor = 0.25
                 if c_u > 0.5 and c_v > 0.5:
-                    factor = 0.1
-                # elif c_u > 0.2 and c_v > 0.2:
-                #     factor *= (1 - 0.5*(c_u + c_v))
+                    factor = 0.05
+                elif c_u > 0.2 and c_v > 0.2:
+                    factor *= (1 - 0.5*(c_u + c_v))
 
                 u_pos = X[(3 * u):(3 * u + 3)]
                 v_pos = X[(3 * v):(3 * v + 3)]
@@ -631,11 +624,11 @@ class Tracker:
 
                 c_u = self.G.nodes[u].get('confidence', 1)
                 c_v = self.G.nodes[v].get('confidence', 1)
-                factor = 0.2
+                factor = 0.25
                 if c_u > 0.5 and c_v > 0.5:
-                    factor = 0.1
-                # elif c_u > 0.2 and c_v > 0.2:
-                #     factor *= (1 - 0.5*(c_u + c_v))
+                    factor = 0.05
+                elif c_u > 0.2 and c_v > 0.2:
+                    factor *= (1 - 0.5*(c_u + c_v))
 
                 u_x, u_y, u_z = X[(3 * u):(3 * u + 3)]
                 v_x, v_y, v_z = X[(3 * v):(3 * v + 3)]
@@ -889,7 +882,8 @@ class Tracker:
 if __name__ == '__main__':
     parser = ArgumentParser()
     parser.add_argument("--dataset", default="dataset")
-    parser.add_argument("--video_id", default="monday_roll15")
+    parser.add_argument("--video", default="monday_roll15")
+    parser.add_argument("--method", default="proposed")
     parser.add_argument("--rod_mesh_file", default="pcd/yale/struct_with_socks_new.ply")
     parser.add_argument("--top_endcap_mesh_file", default="pcd/yale/end_cap_top_new.obj")
     parser.add_argument("--bottom_endcap_mesh_file", default="pcd/yale/end_cap_bottom_new.obj")
@@ -904,14 +898,15 @@ if __name__ == '__main__':
     parser.add_argument("--add_constrained_optimization", action="store_true")
     parser.add_argument("--add_physical_constraints", action="store_true")
     parser.add_argument("--add_ground_constraints", action="store_true")
+    parser.add_argument("--save", action="store_true", help="save observation and qualitative results")
     parser.add_argument("-v", "--visualize", action="store_true")
     args = parser.parse_args()
 
-    video_path = os.path.join(args.dataset, args.video_id)
+    video_path = os.path.join(args.dataset, args.video)
     prefixes = sorted([i.split('.')[0] for i in os.listdir(os.path.join(video_path, 'color'))])
 
     # read data config
-    data_cfg_module = importlib.import_module(f'{args.dataset}.{args.video_id}.config')
+    data_cfg_module = importlib.import_module(f'{args.dataset}.{args.video}.config')
     data_cfg = data_cfg_module.get_config(read_cfg=True)
 
     # read rod point cloud
@@ -971,7 +966,10 @@ if __name__ == '__main__':
         data[prefix]['depth_im'] = depth_im
         data[prefix]['info'] = info
 
-    os.makedirs(os.path.join(video_path, "estimation_cloud"), exist_ok=True)
+    if args.save:
+        os.makedirs(os.path.join(video_path, 'obs_vis'), exist_ok=True)
+        os.makedirs(os.path.join(video_path, f'estimation_vis-{args.method}'), exist_ok=True)
+        os.makedirs(os.path.join(video_path, f"estimation_cloud-{args.method}"), exist_ok=True)
 
     for idx in tqdm(range(args.start_frame, end_frame)):
         prefix = prefixes[idx]
@@ -999,11 +997,6 @@ if __name__ == '__main__':
             key = cv2.waitKey(1)
             if key == ord('q'):
                 exit(0)
-            os.makedirs(os.path.join(video_path, 'estimation_vis'), exist_ok=True)
-            cv2.imwrite(os.path.join(video_path, 'estimation_vis', f'{prefix}.png'), vis_im_bgr)
-
-            os.makedirs(os.path.join(video_path, 'obs_vis'), exist_ok=True)
-            cv2.imwrite(os.path.join(video_path, 'obs_vis', f'{prefix}.png'), tracker.curr_obs_im)
 
             robot_cloud = o3d.geometry.PointCloud()
             for color, (u, v) in data_cfg['color_to_rod'].items():
@@ -1025,12 +1018,17 @@ if __name__ == '__main__':
 
             # estimation_cloud = robot_cloud
             estimation_cloud = robot_cloud + scene_pcd
-            o3d.io.write_point_cloud(os.path.join(video_path, "estimation_cloud", f"{idx:04d}.pcd"), estimation_cloud)
+
+            if args.save:
+                cv2.imwrite(os.path.join(video_path, f'estimation_vis-{args.method}', f'{prefix}.png'), vis_im_bgr)
+                cv2.imwrite(os.path.join(video_path, 'obs_vis', f'{prefix}.png'), tracker.curr_obs_im)
+                o3d.io.write_point_cloud(os.path.join(video_path, f"estimation_cloud-{args.method}", f"{idx:04d}.pcd"), estimation_cloud)
 
     # save rod poses and end cap positions to file
-    pose_output_folder = os.path.join(video_path, "poses")
-    os.makedirs(pose_output_folder, exist_ok=True)
-    for color, (u, v) in tracker.data_cfg['color_to_rod'].items():
-        np.save(os.path.join(pose_output_folder, f'{color}.npy'), np.array(tracker.G.edges[u, v]['pose_list'])[1:])
-        np.save(os.path.join(pose_output_folder, f'{u}_pos.npy'), np.array(tracker.G.nodes[u]['pos_list'])[1:])
-        np.save(os.path.join(pose_output_folder, f'{v}_pos.npy'), np.array(tracker.G.nodes[v]['pos_list'])[1:])
+    if args.save:
+        pose_output_folder = os.path.join(video_path, f"poses-{args.method}")
+        os.makedirs(pose_output_folder, exist_ok=True)
+        for color, (u, v) in tracker.data_cfg['color_to_rod'].items():
+            np.save(os.path.join(pose_output_folder, f'{color}.npy'), np.array(tracker.G.edges[u, v]['pose_list'])[1:])
+            np.save(os.path.join(pose_output_folder, f'{u}_pos.npy'), np.array(tracker.G.nodes[u]['pos_list'])[1:])
+            np.save(os.path.join(pose_output_folder, f'{v}_pos.npy'), np.array(tracker.G.nodes[v]['pos_list'])[1:])
