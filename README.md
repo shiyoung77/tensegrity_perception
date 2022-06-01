@@ -19,3 +19,13 @@ The dataset that is used in the experiment section could be downloaded from [her
 
 
 ## Citation
+```
+@misc{lu20226ndof,
+    title={6N-DoF Pose Tracking for Tensegrity Robots},
+    author={Shiyang Lu and William R. Johnson III and Kun Wang and Xiaonan Huang and Joran Booth and Rebecca Kramer-Bottiglio and Kostas Bekris},
+    year={2022},
+    eprint={2205.14764},
+    archivePrefix={arXiv},
+    primaryClass={cs.RO}
+}
+```
