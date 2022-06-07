@@ -31,11 +31,11 @@ def visualize(visualizer, data_cfg, vis_cloud):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument("--dataset", default="dataset")
-    parser.add_argument("-v", "--video_id", default="0015")
+    parser.add_argument("-v", "--video_id", default="kun21step_7")
     parser.add_argument("--rod_mesh_file", default="pcd/yale/untethered_rod_w_end_cap.ply")
-    parser.add_argument("--first_frame_id", default=50, type=int)
+    parser.add_argument("--first_frame_id", default=0, type=int)
     # parser.add_argument("--first_frame_id", default=20, type=int)
-    parser.add_argument("--window_size", default=1, type=int)
+    parser.add_argument("--window_size", default=5, type=int)
     args = parser.parse_args()
 
     data_cfg_module = importlib.import_module(f'{args.dataset}.{args.video_id}.config')
