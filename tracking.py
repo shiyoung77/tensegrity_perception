@@ -88,9 +88,21 @@ class Tracker:
         scene_pcd = perception_utils.create_pcd(depth_im, self.data_cfg['cam_intr'], color_im,
                                                 depth_trunc=self.data_cfg['depth_trunc'])
         if 'cam_extr' not in self.data_cfg:
-            plane_frame, _ = perception_utils.plane_detection_ransac(scene_pcd, inlier_thresh=0.002,
+            plane_frame, _ = perception_utils.plane_detection_ransac(scene_pcd, inlier_thresh=0.003,
                                                                      visualize=self.cfg.visualize)
             self.data_cfg['cam_extr'] = np.round(plane_frame, decimals=3)
+
+        # #### for "incline" dataset only
+        # pts = np.asarray(scene_pcd.points)
+        # cam_extr = np.array(self.data_cfg['cam_extr'])
+        # origin = cam_extr[:3, 3]
+        # plane_normal = cam_extr[:3, 2]
+        # dist = (pts - origin) @ plane_normal
+        # inlier_indices = np.nonzero(np.abs(dist) > 0.005)[0]
+        # filtered_scene = scene_pcd.select_by_index(inlier_indices)
+        # plane_frame, _ = perception_utils.plane_detection_ransac(filtered_scene, inlier_thresh=0.002,
+        #                                                          visualize=self.cfg.visualize)
+        # self.data_cfg['cam_extr'] = np.round(plane_frame, decimals=3)
 
         if 'init_end_cap_rois' not in self.data_cfg:
             color_im_bgr = cv2.cvtColor(color_im, cv2.COLOR_RGB2BGR)
@@ -151,14 +163,14 @@ class Tracker:
         complete_obs_depth = np.zeros_like(depth_im)
         complete_obs_mask = np.zeros((H, W), dtype=np.bool8)
 
-        # if self.cfg.visualize:
-        #     hsv_im = cv2.cvtColor(color_im, cv2.COLOR_RGB2HSV)
-        #     _, axes = plt.subplots(2, 2)
-        #     axes[0, 0].imshow(color_im)
-        #     axes[0, 1].imshow(complete_obs_color)
-        #     axes[1, 0].imshow(hsv_im)
-        #     axes[1, 1].imshow(complete_obs_depth)
-        #     plt.show()
+        if self.cfg.visualize:
+            hsv_im = cv2.cvtColor(color_im, cv2.COLOR_RGB2HSV)
+            _, axes = plt.subplots(2, 2)
+            axes[0, 0].imshow(color_im)
+            axes[0, 1].imshow(complete_obs_color)
+            axes[1, 0].imshow(hsv_im)
+            axes[1, 1].imshow(complete_obs_depth)
+            plt.show()
 
         # vis_rendered_pts = []
         # vis_obs_pts = []
@@ -179,7 +191,7 @@ class Tracker:
                                        lowerb=tuple(self.data_cfg['hsv_ranges'][color][0]),
                                        upperb=tuple(self.data_cfg['hsv_ranges'][color][1])).astype(np.bool8)
                 if color == 'red':
-                    hsv_mask |= cv2.inRange(color_im_hsv, lowerb=(0, 80, 50), upperb=(20, 255, 255)).astype(np.bool8)
+                    hsv_mask |= cv2.inRange(color_im_hsv, lowerb=(0, 100, 25), upperb=(3, 255, 255)).astype(np.bool8)
                 mask &= hsv_mask
                 assert mask.sum() > 0, f"node {node} ({color}) has no points observable in the initial frame."
                 print(f"{color}-{u} has {mask.sum()} points.")
@@ -254,6 +266,9 @@ class Tracker:
                 rod_pose = self.G.edges[u, v]['pose_list'][-1]
                 rod_pcd.transform(rod_pose)
                 vis_geometries.append(rod_pcd)
+            coord = o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.3)
+            coord.transform(self.data_cfg['cam_extr'])
+            vis_geometries.append(coord)
             o3d.visualization.draw_geometries(vis_geometries)
 
         self.initialized = True
@@ -278,8 +293,8 @@ class Tracker:
         hsv_mask = cv2.inRange(color_im_hsv,
                                lowerb=tuple(self.data_cfg['hsv_ranges'][color][0]),
                                upperb=tuple(self.data_cfg['hsv_ranges'][color][1])).astype(np.bool8)
-        # if color == 'red':
-        #     hsv_mask |= cv2.inRange(color_im_hsv, lowerb=(0, 100, 100), upperb=(10, 255, 255)).astype(np.bool8)
+        if color == 'red':
+            hsv_mask |= cv2.inRange(color_im_hsv, lowerb=(0, 100, 25), upperb=(3, 255, 100)).astype(np.bool8)
         return hsv_mask
 
 
@@ -378,7 +393,7 @@ class Tracker:
 
                 # filter observed points based on z coordinates
                 if self.cfg.filter_observed_pts:
-                    u_obs_pts, v_obs_pts = self.filter_obs_pts(obs_pts, color, radius=max_distance, thresh=0.015)
+                    u_obs_pts, v_obs_pts = self.filter_obs_pts(obs_pts, color, radius=max_distance, thresh=0.02)
                     obs_pts = torch.vstack([u_obs_pts, v_obs_pts])
                     obs_w = torch.ones(obs_pts.shape[0]).cuda()
                 else:
@@ -506,6 +521,7 @@ class Tracker:
             constraints.append(constraint)
 
         if self.cfg.add_ground_constraints:
+        # if self.cfg.add_ground_constraints and int(info.get('prefix', 0)) < 440:
             for u in range(len(self.data_cfg['node_to_color'])):
                 constraint = dict()
                 constraint['type'] = 'ineq'
@@ -588,11 +604,11 @@ class Tracker:
 
                 c_u = self.G.nodes[u].get('confidence', 1)
                 c_v = self.G.nodes[v].get('confidence', 1)
-                factor = 0.25
-                if c_u > 0.5 and c_v > 0.5:
-                    factor = 0.05
-                elif c_u > 0.2 and c_v > 0.2:
-                    factor *= (1 - 0.5*(c_u + c_v))
+                factor = 0.2
+                # if c_u > 0.5 and c_v > 0.5:
+                #     factor = 0.05
+                # elif c_u > 0.2 and c_v > 0.2:
+                #     factor *= (1 - 0.5*(c_u + c_v))
 
                 u_pos = X[(3 * u):(3 * u + 3)]
                 v_pos = X[(3 * v):(3 * v + 3)]
@@ -624,11 +640,11 @@ class Tracker:
 
                 c_u = self.G.nodes[u].get('confidence', 1)
                 c_v = self.G.nodes[v].get('confidence', 1)
-                factor = 0.25
-                if c_u > 0.5 and c_v > 0.5:
-                    factor = 0.05
-                elif c_u > 0.2 and c_v > 0.2:
-                    factor *= (1 - 0.5*(c_u + c_v))
+                factor = 0.2
+                # if c_u > 0.5 and c_v > 0.5:
+                #     factor = 0.05
+                # elif c_u > 0.2 and c_v > 0.2:
+                #     factor *= (1 - 0.5*(c_u + c_v))
 
                 u_x, u_y, u_z = X[(3 * u):(3 * u + 3)]
                 v_x, v_y, v_z = X[(3 * v):(3 * v + 3)]
@@ -1020,8 +1036,8 @@ if __name__ == '__main__':
             estimation_cloud = robot_cloud + scene_pcd
 
             if args.save:
-                cv2.imwrite(os.path.join(video_path, f'estimation_vis-{args.method}', f'{prefix}.png'), vis_im_bgr)
-                cv2.imwrite(os.path.join(video_path, 'obs_vis', f'{prefix}.png'), tracker.curr_obs_im)
+                cv2.imwrite(os.path.join(video_path, f'estimation_vis-{args.method}', f'{prefix}.jpg'), vis_im_bgr)
+                cv2.imwrite(os.path.join(video_path, 'obs_vis', f'{prefix}.jpg'), tracker.curr_obs_im)
                 o3d.io.write_point_cloud(os.path.join(video_path, f"estimation_cloud-{args.method}", f"{idx:04d}.pcd"), estimation_cloud)
 
     # save rod poses and end cap positions to file

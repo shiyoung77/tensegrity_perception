@@ -1,13 +1,24 @@
 #!/bin/bash
 
 DATASET="dataset"
-VIDEO_LIST=({0001..0016})
-# VIDEO_LIST=(may5_3)
+# VIDEO_LIST=({0001..0016})
+# VIDEO_LIST=(15deg_2)
+# VIDEO_LIST=(15deg_2 15deg_4 15deg_6 15deg_7 15deg_10 15deg_12)
+# VIDEO_LIST=(10deg 10deg_{2..6})
+VIDEO_LIST=($(ls $DATASET | grep -E "20deg"))
 METHOD="proposed"
 START_FRAME=0
 END_FRAME=1000  # exclusive
 
+echo "# videos: ${#VIDEO_LIST[@]}"
+
 for VIDEO in ${VIDEO_LIST[@]}; do
+    echo $VIDEO
+    # if [[ $VIDEO != "25wide_44" ]]
+    # then
+    #     continue
+    # fi
+
     python tracking.py \
         --dataset $DATASET \
         --video $VIDEO \
@@ -20,20 +31,30 @@ for VIDEO in ${VIDEO_LIST[@]}; do
         --add_dummy_points \
         --num_dummy_points 50 \
         --dummy_weights 0.5 \
-        --render_scale 2 \
-        --max_correspondence_distances 0.3 0.25 0.2 0.15 0.1 0.06 0.03 \
+        --render_scale 1 \
+        --max_correspondence_distances 0.15 0.1 0.1 0.06 0.05 0.04 0.03 \
         --add_constrained_optimization \
         --add_ground_constraints \
         --add_physical_constraints \
         --filter_observed_pts \
         --visualize \
-        # --save
+        --save
+
+    ffmpeg -r 30 -i "$DATASET/$VIDEO/estimation_vis-${METHOD}/%04d.jpg" \
+        -start_number $START_FRAME \
+        -vframes $(expr $END_FRAME - $START_FRAME) \
+        "$DATASET/$VIDEO/estimation.mp4"
+
+    ffmpeg -i $DATASET/$VIDEO/estimation.mp4 \
+        -t 20 \
+        -vf "fps=10,scale=960:240:flags=lanczos,split[s0][s1];[s0]palettegen[p];[s1][p]paletteuse" \
+        -loop 0 \
+        $DATASET/$VIDEO/$VIDEO.gif
+
+    cp -r $DATASET/$VIDEO/poses-proposed $DATASET/$VIDEO/estimation.mp4 $DATASET/$VIDEO/$VIDEO.gif $DATASET/$VIDEO/config.json --parents /mnt/evo/dataset/new_results
+    # break
 done
 
-# ffmpeg -r 10 -i "$DATASET/$VIDEO/estimation_vis-${METHOD}/%04d.png" \
-#     -start_number $START_FRAME \
-#     -vframes $(expr $END_FRAME - $START_FRAME) \
-#     "$DATASET/$VIDEO/estimation.mp4"
 
 # python compute_T_from_cam_to_mocap_manual.py \
 #     --dataset $DATASET \
