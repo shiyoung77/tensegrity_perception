@@ -173,3 +173,11 @@ def kabsch(Q: np.ndarray, P: np.ndarray):
     T[:3, :3] = R
     T[:3, 3:4] = t
     return T
+
+
+def vis_pcd(pcd) -> None:
+    mesh_frame = o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.1, origin=[0, 0, 0])
+    if isinstance(pcd, o3d.geometry.PointCloud):
+        o3d.visualization.draw_geometries([mesh_frame, pcd])
+    else:
+        o3d.visualization.draw_geometries([mesh_frame, *pcd])
