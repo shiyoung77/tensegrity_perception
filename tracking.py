@@ -9,12 +9,13 @@ from typing import List, Dict
 
 import numpy as np
 import numpy.linalg as la
-import torch
+import torch  # I have no idea why importing torch can speed up the program :(
 import cv2
 import networkx as nx
 import open3d as o3d
 from pyquaternion import Quaternion
 from scipy.optimize import minimize
+from scipy.spatial import KDTree
 from matplotlib import pyplot as plt
 from tqdm import tqdm
 import trimesh
@@ -44,8 +45,10 @@ class Tracker:
         self.rod_mesh = rod_mesh
         self.rod_length = self.data_cfg['rod_length']
 
-        # set up pyrender scene
         H, W = self.data_cfg['im_h'], self.data_cfg['im_w']
+        self.obs_vis = np.empty((self.data_cfg['im_h'], self.data_cfg['im_w'], 3), dtype=np.uint8)
+
+        # set up pyrender scene
         self.renderer = pyrender.OffscreenRenderer(W // self.cfg.render_scale, H // self.cfg.render_scale)
         cam_intr = np.asarray(self.data_cfg['cam_intr'])
         fx = cam_intr[0, 0] / self.cfg.render_scale
@@ -199,14 +202,14 @@ class Tracker:
                 complete_obs_mask |= mask
 
                 endcap_pcd = create_pcd(masked_depth_im, self.data_cfg['cam_intr'])
-                endcap_pts = torch.from_numpy(np.asarray(endcap_pcd.points))
+                endcap_pts = np.asarray(endcap_pcd.points)
 
                 # filter observable endcap points by z coordinates
                 if self.cfg.filter_observed_pts:
                     zs = endcap_pts[:, 2]
-                    z_min = torch.sort(zs[zs > 0]).values[int(endcap_pts.shape[0] * 0.1)]
+                    z_min = np.percentile(zs, q=10, method="lower")
                     endcap_pts = endcap_pts[zs < z_min + 0.02]
-                    endcap_center = endcap_pts.mean(dim=0).numpy()
+                    endcap_center = endcap_pts.mean(0)
 
                 # filter observable endcap point cloud by finding the largest cluster
                 # if color == "green":
@@ -221,7 +224,7 @@ class Tracker:
                 obs_pts.append(endcap_pts)
 
             # icp refinement
-            obs_pts = torch.vstack(obs_pts).cuda()
+            obs_pts = np.vstack(obs_pts)
             init_pose = self.estimate_rod_pose_from_endcap_centers(endcap_centers)
 
             model = self.endcap_meshes[0] + self.endcap_meshes[1]
@@ -229,7 +232,7 @@ class Tracker:
             _, pt_map = model.hidden_point_removal([0, 0, 0], radius=0.01)
             model_pcd = model.select_by_index(pt_map, invert=True)
             model_pcd.paint_uniform_color([1, 0, 0])
-            rendered_pts = torch.from_numpy(np.asarray(model_pcd.points)).cuda()
+            rendered_pts = np.asarray(model_pcd.points)
             # unseen_pcd = model.select_by_index(pt_map, invert=False)
             # unseen_pcd.paint_uniform_color([0, 0, 1])
             # vis_pcd([model_pcd, unseen_pcd])
@@ -237,7 +240,7 @@ class Tracker:
             # mesh_nodes = [self.create_scene_node(str(i), self.endcap_meshes[i], init_pose) for i in range(2)]
             # rendered_depth_im = self.render_nodes(mesh_nodes, depth_only=True)
             # rendered_pts, _ = self.back_projection(torch.from_numpy(rendered_depth_im).cuda())
-            rod_pose, Q, P = self.projective_icp_cuda(obs_pts, rendered_pts, init_pose, max_distance=0.1, verbose=False)
+            rod_pose = self.register(obs_pts, rendered_pts, init_pose, max_distance=0.1, verbose=False)
 
             # vis_obs_pts.append(Q)
             # vis_rendered_pts.append(P)
@@ -286,20 +289,6 @@ class Tracker:
         self.initialized = True
 
 
-    def back_projection(self, depth_im: torch.Tensor):
-        cam_intr = np.asarray(self.data_cfg['cam_intr'])
-        fx, fy = cam_intr[0, 0], cam_intr[1, 1]
-        cx, cy = cam_intr[0, 2], cam_intr[1, 2]
-
-        indices = torch.nonzero(depth_im > 0)
-        ys, xs = indices[:, 0], indices[:, 1]
-        Z_obs = depth_im[ys, xs]
-        X_obs = (xs - cx) / fx * Z_obs
-        Y_obs = (ys - cy) / fy * Z_obs
-        pts = torch.stack([X_obs, Y_obs, Z_obs]).T  # (N, 3)
-        return pts, (ys, xs)
-
-
     def compute_hsv_mask(self, color_im, color) -> np.ndarray:
         color_im_hsv = cv2.cvtColor(color_im, cv2.COLOR_RGB2HSV)
         hsv_mask = cv2.inRange(color_im_hsv,
@@ -314,18 +303,15 @@ class Tracker:
         fx, fy = self.data_cfg['cam_intr'][0][0], self.data_cfg['cam_intr'][1][1]
         cx, cy = self.data_cfg['cam_intr'][0][2], self.data_cfg['cam_intr'][1][2]
 
-        depth_im = torch.clone(depth_im)
-        depth_im[~mask] = 0
-        indices = torch.nonzero(depth_im)
-        ys, xs = indices[:, 0], indices[:, 1]
+        ys, xs = np.nonzero((depth_im > 0) & mask)
         Z_obs = depth_im[ys, xs]
         X_obs = (xs - cx) / fx * Z_obs
         Y_obs = (ys - cy) / fy * Z_obs
-        pts = torch.stack([X_obs, Y_obs, Z_obs]).T
-        return pts.cpu().numpy()  # (N, 3)
+        pts = np.vstack([X_obs, Y_obs, Z_obs]).T
+        return pts
 
 
-    def filter_obs_pts(self, obs_pts: torch.Tensor, color, radius=0.1, thresh=0.01):
+    def filter_obs_pts(self, obs_pts, color, radius=0.1, thresh=0.01):
         u, v = self.data_cfg['color_to_rod'][color]
         u_pos = self.G.nodes[u]['pos_list'][-1]
         u_dist_sqr = np.sum((obs_pts - u_pos)**2, axis=1)
@@ -352,19 +338,19 @@ class Tracker:
 
     def update(self, color_im, depth_im, info):
         assert self.initialized, "[Error] You must first initialize the tracker!"
-
-        H, W = depth_im.shape
-        depth_im_gpu = torch.from_numpy(depth_im).cuda()
+        self.color_im = color_im
+        self.depth_im = depth_im
 
         # get observed 3D points for both end caps of each rod
         obs_pts_dict = dict()
         model_pcd_dict = dict()
         mesh_nodes = dict()
 
-        obs_vis = np.zeros((self.data_cfg['im_h'], self.data_cfg['im_w'], 3), dtype=np.uint8)
+        self.obs_vis = np.zeros_like(self.obs_vis)
         for color, (u, v) in self.data_cfg['color_to_rod'].items():
             hsv_mask = self.compute_hsv_mask(color_im, color)
-            obs_pts = self.compute_obs_pts(depth_im_gpu, hsv_mask)
+            obs_pts = self.compute_obs_pts(depth_im, hsv_mask)
+            # obs_pts = self.compute_obs_pts(depth_im_gpu, hsv_mask)
             obs_pts_dict[color] = obs_pts
 
             prev_pose = self.G.edges[u, v]['pose_list'][-1].copy()
@@ -379,17 +365,12 @@ class Tracker:
             # mesh_nodes[self.create_scene_node(f"node-{u}", self.endcap_meshes[0], prev_pose)] = u + 1
             # mesh_nodes[self.create_scene_node(f"node-{v}", self.endcap_meshes[1], prev_pose)] = v + 1
 
-            # for debugging purpose
             if color == 'red':
-                obs_vis[:, :, 2][hsv_mask] = 255
+                self.obs_vis[:, :, 0][hsv_mask] = 255
             elif color == 'green':
-                obs_vis[:, :, 1][hsv_mask] = 255
+                self.obs_vis[:, :, 1][hsv_mask] = 255
             elif color == 'blue':
-                obs_vis[:, :, 0][hsv_mask] = 255
-
-        self.curr_obs_im = obs_vis
-        if self.cfg.visualize:
-            cv2.imshow("obs", obs_vis)
+                self.obs_vis[:, :, 2][hsv_mask] = 255
 
         # rendered_seg, rendered_depth = self.render_nodes(mesh_nodes, depth_only=False)
         # rendered_seg_gpu = torch.from_numpy(rendered_seg).cuda()
@@ -423,17 +404,17 @@ class Tracker:
                     u_dummy = self.G.nodes[u]['pos_list'][-1]
                     v_dummy = self.G.nodes[v]['pos_list'][-1]
 
-                    obs_pts = torch.from_numpy(np.vstack([u_obs_pts, v_obs_pts, u_dummy, v_dummy])).cuda()
-                    obs_w = torch.ones(obs_pts.shape[0], dtype=torch.float32, device="cuda:0")
+                    obs_pts = np.vstack([u_obs_pts, v_obs_pts, u_dummy, v_dummy])
+                    obs_w = np.ones(obs_pts.shape[0])
                     obs_w[-2:] = self.cfg.dummy_weights * self.cfg.num_dummy_points
 
-                    rendered_pts = torch.from_numpy(np.vstack([u_rendered_pts, v_rendered_pts, u_dummy, v_dummy])).cuda()
-                    rendered_w = torch.ones(rendered_pts.shape[0], dtype=torch.float32, device="cuda:0")
+                    rendered_pts = np.vstack([u_rendered_pts, v_rendered_pts, u_dummy, v_dummy])
+                    rendered_w = np.ones(rendered_pts.shape[0])
                     rendered_w[-2:] = self.cfg.dummy_weights * self.cfg.num_dummy_points
 
-                prev_pose = self.G.edges[u, v]['pose_list'][-1].copy()
-                rod_pose, Q, P = self.projective_icp_cuda(obs_pts, rendered_pts, prev_pose, obs_w=obs_w, rendered_w=rendered_w,
-                                                          max_distance=max_distance)
+                prev_pose = np.copy(self.G.edges[u, v]['pose_list'][-1])
+                rod_pose = self.register(obs_pts, rendered_pts, prev_pose, obs_w=obs_w, rendered_w=rendered_w,
+                                         max_distance=max_distance)
 
                 model_pcd_dict[u].transform(rod_pose @ la.inv(prev_pose))
                 model_pcd_dict[v].transform(rod_pose @ la.inv(prev_pose))
@@ -447,14 +428,13 @@ class Tracker:
                     self.G.nodes[u]['pos_list'][-1] = rod_pose[:3, 3] + rod_pose[:3, 2] * self.rod_length / 2
                     self.G.nodes[v]['pos_list'][-1] = rod_pose[:3, 3] - rod_pose[:3, 2] * self.rod_length / 2
 
-
                 # self.G.nodes[u]['confidence'] = self.compute_confidence(u_obs_pts, u_rendered_pts, num_thresh=50, inlier_thresh=0.02)
                 # self.G.nodes[v]['confidence'] = self.compute_confidence(v_obs_pts, v_rendered_pts, num_thresh=50, inlier_thresh=0.02)
 
             # print(f"point registration takes {time.time() - tic}s")
 
             # ================================== correction step ==================================
-            if self.cfg.add_constrained_optimization:
+            if iter % 2 == 0 and self.cfg.add_constrained_optimization:
                 tic = time.time()
                 self.constrained_optimization(info)
                 # print(f"optimization takes {time.time() - tic}s")
@@ -507,22 +487,22 @@ class Tracker:
         return self.render_nodes(seg_node_map)
 
 
-    def compute_confidence(self, obs_pts, rendered_pts, num_thresh=50, inlier_thresh=0.01):
-        N, M  = obs_pts.shape[0], rendered_pts.shape[0]
-        if N < num_thresh or M < num_thresh:
-            return 0
+    # def compute_confidence(self, obs_pts, rendered_pts, num_thresh=50, inlier_thresh=0.01):
+    #     N, M  = obs_pts.shape[0], rendered_pts.shape[0]
+    #     if N < num_thresh or M < num_thresh:
+    #         return 0
 
-        distances = torch.norm(rendered_pts.unsqueeze(1) - obs_pts.unsqueeze(0), dim=2)  # (N, M)
-        tp = 0
+    #     distances = torch.norm(rendered_pts.unsqueeze(1) - obs_pts.unsqueeze(0), dim=2)  # (N, M)
+    #     tp = 0
 
-        closest_distance, _ = torch.min(distances, dim=1)
-        tp += torch.sum(closest_distance < inlier_thresh)
+    #     closest_distance, _ = torch.min(distances, dim=1)
+    #     tp += torch.sum(closest_distance < inlier_thresh)
 
-        closest_distance, _ = torch.min(distances, dim=0)
-        tp += torch.sum(closest_distance < inlier_thresh)
+    #     closest_distance, _ = torch.min(distances, dim=0)
+    #     tp += torch.sum(closest_distance < inlier_thresh)
 
-        f1 = tp / (N + M)
-        return f1.item()
+    #     f1 = tp / (N + M)
+    #     return f1.item()
 
 
     def constrained_optimization(self, info):
@@ -746,25 +726,6 @@ class Tracker:
         return constraint_function, jacobian_function
 
 
-    def rigid_finetune(self, complete_obs_depth):
-        mesh_nodes = []
-        init_poses = []
-        for color, (u, v) in self.data_cfg['color_to_rod'].items():
-            mesh_node = pyrender.Node(name=f'{color}-mesh', mesh=self.rod_mesh, matrix=np.eye(4))
-            prev_rod_pose = self.G.edges[u, v]['pose_list'][-1]
-            mesh_nodes.append(mesh_node)
-            init_poses.append(prev_rod_pose)
-
-        finetuned_poses, _ = self.projective_icp_cuda(complete_obs_depth, mesh_nodes, init_poses, max_iter=30,
-                                                      max_distance=0.02, early_stop_thresh=0.0015, verbose=False)
-
-        for i, (u, v) in enumerate(self.data_cfg['color_to_rod'].values()):
-            finetuned_pose = finetuned_poses[i]
-            self.G.edges[u, v]['pose_list'][-1] = finetuned_pose
-            self.G.nodes[u]['pos_list'][-1] = finetuned_pose[:3, 3] + finetuned_pose[:3, 2] * self.rod_length / 2
-            self.G.nodes[v]['pos_list'][-1] = finetuned_pose[:3, 3] - finetuned_pose[:3, 2] * self.rod_length / 2
-
-
     @staticmethod
     def estimate_rod_pose_from_endcap_centers(curr_endcap_centers, prev_rod_pose=None):
         curr_rod_pos = (curr_endcap_centers[0] + curr_endcap_centers[1]) / 2
@@ -790,42 +751,37 @@ class Tracker:
         return curr_rod_pose
 
 
-    def projective_icp_cuda(self, obs_pts: torch.Tensor, rendered_pts: torch.Tensor, init_pose: np.ndarray,
-                            obs_w: torch.Tensor = None, rendered_w: torch.Tensor = None,
-                            max_distance=0.02, verbose=False):
-        N, M = obs_pts.shape[0], rendered_pts.shape[0]
+    def register(self, obs_pts, rendered_pts, init_pose, obs_w=None, rendered_w=None, max_distance=0.02, verbose=False):
         if obs_w is None:
-            obs_w = torch.ones(N).cuda()
+            obs_w = np.ones(obs_pts.shape[0])
         if rendered_w is None:
-            rendered_w = torch.ones(M).cuda()
+            rendered_w = np.ones(rendered_pts.shape[0])
 
         # ICP ref: https://www.youtube.com/watch?v=djnd502836w&t=781s
-        # nearest neighbor data association
-        distances = torch.norm(obs_pts.unsqueeze(1) - rendered_pts.unsqueeze(0), dim=2)  # (N, M)
+        r_tree = KDTree(rendered_pts)
+        closest_distance, closest_indices = r_tree.query(obs_pts, k=1, distance_upper_bound=max_distance)
+        mask = (closest_distance != np.inf)
+        Q1 = obs_pts[mask]
+        P1 = rendered_pts[closest_indices[mask]]
+        W1 = (1 - (closest_distance[mask] / max_distance)**2)**2 * obs_w[mask] * rendered_w[closest_indices[mask]]
 
-        closest_distance, closest_indices = torch.min(distances, dim=1)  # find corresponded rendered pts for obs pts
-        dist_mask = closest_distance < max_distance
-        Q1 = obs_pts[dist_mask]
-        P1 = rendered_pts[closest_indices][dist_mask]
-        W1 = (1 - (closest_distance[dist_mask] / max_distance)**2)**2 * obs_w[dist_mask] * rendered_w[closest_indices][dist_mask]
+        o_tree = KDTree(obs_pts)
+        closest_distance, closest_indices = o_tree.query(rendered_pts, k=1, distance_upper_bound=max_distance)
+        mask = (closest_distance != np.inf)
+        Q2 = obs_pts[closest_indices[mask]]
+        P2 = rendered_pts[mask]
+        W2 = (1 - (closest_distance[mask] / max_distance)**2)**2 * obs_w[closest_indices[mask]] * rendered_w[mask]
 
-        closest_distance, closest_indices = torch.min(distances, dim=0)  # find cooresponded obs pts for rendered pts
-        dist_mask = closest_distance < max_distance
-        Q2 = obs_pts[closest_indices][dist_mask]
-        P2 = rendered_pts[dist_mask]
-        W2 = (1 - (closest_distance[dist_mask] / max_distance)**2)**2 * obs_w[closest_indices][dist_mask] * rendered_w[dist_mask]
-
-        Q = torch.vstack([Q1, Q2]).cpu().numpy().astype(np.float64)
-        P = torch.vstack([P1, P2]).cpu().numpy().astype(np.float64)
-        W = torch.hstack([W1, W2]).cpu().numpy().astype(np.float64)
+        Q = np.vstack([Q1, Q2])
+        P = np.vstack([P1, P2])
+        W = np.hstack([W1, W2])
 
         P_mean = P.mean(0)
         Q_mean = Q.mean(0)
 
         # https://github.com/scipy/scipy/blob/main/scipy/spatial/transform/_rotation.pyx#L2367
-        # H = torch.einsum('ji,jk->ik', W[:, None] * (Q - Q_mean).T, (P - P_mean).T)
         H = (W[:, None] * (Q - Q_mean)).T @ (P - P_mean)
-        U, _, V_t = la.svd(H)  # SVD on CPU is 100x faster than on GPU
+        U, _, V_t = la.svd(H)
 
         # ensure that R is in the right-hand coordinate system, very important!!!
         # https://en.wikipedia.org/wiki/Kabsch_algorithm
@@ -836,17 +792,10 @@ class Tracker:
             [0, 0, d]
         ], dtype=np.float64) @ V_t
         t = Q_mean - R @ P_mean
-
-        if verbose:
-            error_before = torch.mean(torch.norm(Q - P, dim=0)).item()
-            error_after = torch.mean(torch.norm(Q - (R @ P + t), dim=0)).item()
-            print(f"{error_before = :.4f}, {error_after = :.4f}, delta = {error_before - error_after:.4f}")
-
         delta_T = np.eye(4, dtype=np.float64)
         delta_T[:3, :3] = R
         delta_T[:3, 3] = t
-        # return delta_T @ init_pose, Q.T, (R @ P + t).T
-        return delta_T @ init_pose, None, None
+        return delta_T @ init_pose
 
 
     # https://math.stackexchange.com/questions/1993953/closest-points-between-two-lines
@@ -916,6 +865,42 @@ class Tracker:
                 geometries.extend(create_geometries_for_vis(p5, p6, [1, 1, 0], radius=0.005))
 
         o3d.visualization.draw_geometries(geometries)
+
+
+    def get_2d_vis(self):
+        rendered_seg, rendered_depth = tracker.render_current_state()
+        H, W = self.data_cfg['im_h'], self.data_cfg['im_w']
+        vis_im1 = np.copy(self.color_im)
+        vis_im2 = np.zeros_like(self.color_im)
+        for i, color in enumerate(['red', 'green', 'blue']):
+            mask = rendered_depth.copy()
+            mask[rendered_seg != i + 1] = 0
+            vis_im1[depth_im < mask] = Tracker.ColorDict[color]
+            vis_im2[mask > 0] = Tracker.ColorDict[color]
+        vis_im = np.empty((H*2, W*2, 3), dtype=np.uint8)
+        vis_im[:H, :W] = self.color_im
+        vis_im[H:, :W] = tracker.obs_vis
+        vis_im[:H, W:] = vis_im1
+        vis_im[H:, W:] = vis_im2
+        return vis_im
+
+
+    def get_3d_vis(self):
+        robot_pcd = o3d.geometry.PointCloud()
+        for color, (u, v) in data_cfg['color_to_rod'].items():
+            rod_pcd = copy.deepcopy(tracker.rod_pcd)
+            rod_pcd = rod_pcd.paint_uniform_color(np.array(Tracker.ColorDict[color]) / 255)
+            rod_pose = np.copy(tracker.G.edges[u, v]['pose_list'][-1])
+            rod_pcd.transform(rod_pose)
+            robot_pcd += rod_pcd
+
+        scene_pcd = create_pcd(depth_im, data_cfg['cam_intr'], color_im, depth_trunc=data_cfg['depth_trunc'])
+        robot_pts = np.asarray(robot_pcd.points)
+        bbox = o3d.geometry.AxisAlignedBoundingBox()
+        bbox.min_bound = robot_pts.min(axis=0) - 0.05
+        bbox.max_bound = robot_pts.max(axis=0) + 0.05
+        scene_pcd = scene_pcd.crop(bbox)
+        return robot_pcd + scene_pcd
 
 
 if __name__ == '__main__':
@@ -1015,7 +1000,6 @@ if __name__ == '__main__':
         data[prefix]['info'] = info
 
     if args.save:
-        os.makedirs(os.path.join(video_path, 'obs_vis'), exist_ok=True)
         os.makedirs(os.path.join(video_path, f'estimation_vis-{args.method}'), exist_ok=True)
         os.makedirs(os.path.join(video_path, f"estimation_cloud-{args.method}"), exist_ok=True)
 
@@ -1031,45 +1015,16 @@ if __name__ == '__main__':
         # print(f"update takes: {time.time() - tic}s")
 
         if args.visualize:
-            rendered_seg, rendered_depth = tracker.render_current_state()
-            vis_im1 = np.copy(color_im)
-            vis_im2 = np.zeros_like(color_im)
-            for i, color in enumerate(['red', 'green', 'blue']):
-                mask = rendered_depth.copy()
-                mask[rendered_seg != i + 1] = 0
-                vis_im1[depth_im < mask] = Tracker.ColorDict[color]
-                vis_im2[mask > 0] = Tracker.ColorDict[color]
-            vis_im = np.hstack([color_im, vis_im1, vis_im2])
+            vis_im = tracker.get_2d_vis()
             vis_im_bgr = cv2.cvtColor(vis_im, cv2.COLOR_RGB2BGR)
             cv2.imshow("estimation", vis_im_bgr)
             key = cv2.waitKey(1)
             if key == ord('q'):
                 exit(0)
 
-            robot_cloud = o3d.geometry.PointCloud()
-            for color, (u, v) in data_cfg['color_to_rod'].items():
-                rod_pcd = copy.deepcopy(tracker.rod_pcd)
-                rod_pcd = rod_pcd.paint_uniform_color(np.array(Tracker.ColorDict[color]) / 255)
-                rod_pose = copy.deepcopy(tracker.G.edges[u, v]['pose_list'][-1])
-                rod_pcd.transform(rod_pose)
-                robot_cloud += rod_pcd
-
-            scene_pcd = create_pcd(depth_im, data_cfg['cam_intr'], color_im, depth_trunc=data_cfg['depth_trunc'])
-
-            # crop scene cloud to save only region of interest
-            robot_pts = np.asarray(robot_cloud.points)
-            bbox = o3d.geometry.AxisAlignedBoundingBox()
-            bbox.min_bound = robot_pts.min(axis=0) - 0.05
-            bbox.max_bound = robot_pts.max(axis=0) + 0.05
-            scene_pcd = scene_pcd.crop(bbox)
-
-            # estimation_cloud = robot_cloud
-            estimation_cloud = robot_cloud + scene_pcd
-
             if args.save:
                 cv2.imwrite(os.path.join(video_path, f'estimation_vis-{args.method}', f'{prefix}.jpg'), vis_im_bgr)
-                cv2.imwrite(os.path.join(video_path, 'obs_vis', f'{prefix}.jpg'), tracker.curr_obs_im)
-                o3d.io.write_point_cloud(os.path.join(video_path, f"estimation_cloud-{args.method}", f"{idx:04d}.pcd"), estimation_cloud)
+                o3d.io.write_point_cloud(os.path.join(video_path, f"estimation_cloud-{args.method}", f"{idx:04d}.pcd"), tracker.get_3d_vis())
 
     # save rod poses and end cap positions to file
     if args.save:
