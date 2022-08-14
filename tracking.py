@@ -289,25 +289,15 @@ class Tracker:
         self.initialized = True
 
 
-    def compute_hsv_mask(self, color_im, color) -> np.ndarray:
-        color_im_hsv = cv2.cvtColor(color_im, cv2.COLOR_RGB2HSV)
-        hsv_mask = cv2.inRange(color_im_hsv,
-                               lowerb=tuple(self.data_cfg['hsv_ranges'][color][0]),
-                               upperb=tuple(self.data_cfg['hsv_ranges'][color][1])).astype(np.bool8)
-        # if color == 'red':
-        #     hsv_mask |= cv2.inRange(color_im_hsv, lowerb=(0, 100, 25), upperb=(3, 255, 100)).astype(np.bool8)
-        return hsv_mask
-
-
     def compute_obs_pts(self, depth_im, mask):
         fx, fy = self.data_cfg['cam_intr'][0][0], self.data_cfg['cam_intr'][1][1]
         cx, cy = self.data_cfg['cam_intr'][0][2], self.data_cfg['cam_intr'][1][2]
 
         ys, xs = np.nonzero((depth_im > 0) & mask)
-        Z_obs = depth_im[ys, xs]
-        X_obs = (xs - cx) / fx * Z_obs
-        Y_obs = (ys - cy) / fy * Z_obs
-        pts = np.vstack([X_obs, Y_obs, Z_obs]).T
+        pts = np.empty([len(ys), 3], dtype=np.float32)
+        pts[:, 2] = depth_im[ys, xs]
+        pts[:, 0] = (xs - cx) / fx * pts[:, 2]
+        pts[:, 1] = (ys - cy) / fy * pts[:, 2]
         return pts
 
 
@@ -348,9 +338,15 @@ class Tracker:
 
         self.obs_vis = np.zeros_like(self.obs_vis)
         for color, (u, v) in self.data_cfg['color_to_rod'].items():
-            hsv_mask = self.compute_hsv_mask(color_im, color)
+            color_im_hsv = cv2.cvtColor(color_im, cv2.COLOR_RGB2HSV)
+            hsv_mask = cv2.inRange(
+                color_im_hsv,
+                lowerb=tuple(self.data_cfg['hsv_ranges'][color][0]),
+                upperb=tuple(self.data_cfg['hsv_ranges'][color][1])
+            ).astype(np.bool8)
+            # if color == 'red':
+            #     hsv_mask |= cv2.inRange(color_im_hsv, lowerb=(0, 100, 25), upperb=(3, 255, 100)).astype(np.bool8)
             obs_pts = self.compute_obs_pts(depth_im, hsv_mask)
-            # obs_pts = self.compute_obs_pts(depth_im_gpu, hsv_mask)
             obs_pts_dict[color] = obs_pts
 
             prev_pose = self.G.edges[u, v]['pose_list'][-1].copy()
@@ -597,11 +593,11 @@ class Tracker:
         def objective_function(X):
             unary_loss = 0
             for i in range(len(self.data_cfg['node_to_color'])):
-                pos = X[(3 * i):(3 * i + 3)]
-                estimated_pos = self.G.nodes[i]['pos_list'][-1]
+                pos_est = X[(3 * i):(3 * i + 3)]
+                pos_old = self.G.nodes[i]['pos_list'][-1]
                 # confidence = self.G.nodes[i].get('confidence', 1)
                 confidence = 1
-                unary_loss += confidence * np.sum((pos - estimated_pos)**2)
+                unary_loss += confidence * np.sum((pos_est - pos_old)**2)
 
             binary_loss = 0
             for sensor_id, (u, v) in self.data_cfg['sensor_to_tendon'].items():
@@ -609,9 +605,9 @@ class Tracker:
                 if not self.data_cfg["sensor_status"][sensor_id] or sensor_measurement[sensor_id]['length'] <= 0:
                     continue
 
-                c_u = self.G.nodes[u].get('confidence', 1)
-                c_v = self.G.nodes[v].get('confidence', 1)
                 factor = 0.2
+                # c_u = self.G.nodes[u].get('confidence', 1)
+                # c_v = self.G.nodes[v].get('confidence', 1)
                 # if c_u > 0.5 and c_v > 0.5:
                 #     factor = 0.05
                 # elif c_u > 0.2 and c_v > 0.2:
@@ -634,11 +630,11 @@ class Tracker:
             result = np.zeros_like(X)
 
             for i in range(len(self.data_cfg['node_to_color'])):
-                x_hat, y_hat, z_hat = self.G.nodes[i]['pos_list'][-1]
-                x, y, z = X[3*i : 3*i + 3]
+                pos_est = X[3 * i : 3 * i + 3]
+                pos_old = self.G.nodes[i]['pos_list'][-1]
                 # confidence = self.G.nodes[i].get('confidence', 1)
                 confidence = 1
-                result[3*i : 3*i + 3] = 2*confidence*np.array([x - x_hat, y - y_hat, z - z_hat])
+                result[3 * i : 3 * i + 3] = 2 * confidence * (pos_est - pos_old)
 
             for sensor_id, (u, v) in self.data_cfg['sensor_to_tendon'].items():
                 sensor_id = str(sensor_id)
@@ -653,17 +649,17 @@ class Tracker:
                 # elif c_u > 0.2 and c_v > 0.2:
                 #     factor *= (1 - 0.5*(c_u + c_v))
 
-                u_x, u_y, u_z = X[(3 * u):(3 * u + 3)]
-                v_x, v_y, v_z = X[(3 * v):(3 * v + 3)]
-                l_est = np.sqrt((u_x - v_x)**2 + (u_y - v_y)**2 + (u_z - v_z)**2)
+                u_pos = X[(3 * u):(3 * u + 3)]
+                v_pos = X[(3 * v):(3 * v + 3)]
+                l_est = la.norm(u_pos - v_pos)
                 l_gt = sensor_measurement[sensor_id]['length'] / self.data_cfg['cable_length_scale']
 
                 # sanity check
                 if np.abs(l_est - l_gt) > 0.1:
                     factor = 0
 
-                result[3*u : 3*u + 3] += 2*factor*(l_est - l_gt)*np.array([u_x - v_x, u_y - v_y, u_z - v_z]) / l_est
-                result[3*v : 3*v + 3] += 2*factor*(l_est - l_gt)*np.array([v_x - u_x, v_y - u_y, v_z - u_z]) / l_est
+                result[3 * u : 3 * u + 3] += 2 * factor * (l_est - l_gt) * (u_pos - v_pos) / (l_est + 1e-12)
+                result[3 * v : 3 * v + 3] += 2 * factor * (l_est - l_gt) * (v_pos - u_pos) / (l_est + 1e-12)
 
             return result
 
@@ -678,12 +674,12 @@ class Tracker:
             return la.norm(u_pos - v_pos) - rod_length
 
         def jacobian_function(X):
-            u_x, u_y, u_z = X[3 * u : 3 * u + 3]
-            v_x, v_y, v_z = X[3 * v : 3 * v + 3]
-            C = np.sqrt((u_x - v_x)**2 + (u_y - v_y)**2 + (u_z - v_z)**2)  # denominator
+            u_pos = X[3 * u : 3 * u + 3]
+            v_pos = X[3 * v : 3 * v + 3]
+            C = la.norm(u_pos - v_pos) + 1e-12
             result = np.zeros_like(X)
-            result[3 * u : 3 * u + 3] = np.array([u_x - v_x, u_y - v_y, u_z - v_z]) / C
-            result[3 * v : 3 * v + 3] = np.array([v_x - u_x, v_y - u_y, v_z - u_z]) / C
+            result[3 * u : 3 * u + 3] = (u_pos - v_pos) / C
+            result[3 * v : 3 * v + 3] = (v_pos - u_pos) / C
             return result
 
         return constraint_function, jacobian_function
@@ -703,7 +699,7 @@ class Tracker:
         p5 = alpha1 * p1 + (1 - alpha1) * p2  # closest point on (u, v)
         p6 = alpha2 * p3 + (1 - alpha2) * p4  # closest point on (p, q)
         v1 = p5 - p6
-        v1 /= la.norm(v1)
+        v1 /= (la.norm(v1) + 1e-12)
 
         def constraint_function(X):
             q1 = X[3 * u : 3 * u + 3]
