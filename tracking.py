@@ -9,7 +9,6 @@ from typing import List, Dict
 
 import numpy as np
 import numpy.linalg as la
-import torch  # I have no idea why importing torch can speed up the program :(
 import cv2
 import networkx as nx
 import open3d as o3d
@@ -88,9 +87,10 @@ class Tracker:
 
 
     def initialize(self, color_im: np.ndarray, depth_im: np.ndarray, info: dict, compute_hsv: bool = True):
+        self.color_im = color_im
+        self.depth_im = depth_im
 
-        scene_pcd = create_pcd(depth_im, self.data_cfg['cam_intr'], color_im,
-                                                depth_trunc=self.data_cfg['depth_trunc'])
+        scene_pcd = create_pcd(depth_im, self.data_cfg['cam_intr'], color_im, depth_trunc=self.data_cfg['depth_trunc'])
         if 'cam_extr' not in self.data_cfg:
             plane_frame, _ = plane_detection_ransac(scene_pcd, inlier_thresh=0.003, visualize=self.cfg.visualize)
             self.data_cfg['cam_extr'] = np.round(plane_frame, decimals=3)
@@ -240,7 +240,7 @@ class Tracker:
             # mesh_nodes = [self.create_scene_node(str(i), self.endcap_meshes[i], init_pose) for i in range(2)]
             # rendered_depth_im = self.render_nodes(mesh_nodes, depth_only=True)
             # rendered_pts, _ = self.back_projection(torch.from_numpy(rendered_depth_im).cuda())
-            rod_pose = self.register(obs_pts, rendered_pts, init_pose, max_distance=0.1, verbose=False)
+            rod_pose = self.register(obs_pts, rendered_pts, init_pose, max_distance=0.1)
 
             # vis_obs_pts.append(Q)
             # vis_rendered_pts.append(P)
@@ -747,7 +747,7 @@ class Tracker:
         return curr_rod_pose
 
 
-    def register(self, obs_pts, rendered_pts, init_pose, obs_w=None, rendered_w=None, max_distance=0.02, verbose=False):
+    def register(self, obs_pts, rendered_pts, init_pose, obs_w=None, rendered_w=None, max_distance=0.02):
         if obs_w is None:
             obs_w = np.ones(obs_pts.shape[0])
         if rendered_w is None:
@@ -966,49 +966,31 @@ if __name__ == '__main__':
     data_cfg_module.write_config(tracker.data_cfg)
 
     if args.visualize:
-        cv2.namedWindow("estimation")
-        cv2.moveWindow("estimation", 800, 100)
-        rendered_seg, rendered_depth = tracker.render_current_state()
-        vis_im = np.copy(color_im)
-        for i, color in enumerate(['red', 'green', 'blue']):
-            mask = rendered_depth.copy()
-            mask[rendered_seg != i + 1] = 0
-            vis_im[depth_im < mask] = Tracker.ColorDict[color]
+        vis_im = tracker.get_2d_vis()
         cv2.imshow("estimation", cv2.cvtColor(vis_im, cv2.COLOR_RGB2BGR))
-        key = cv2.waitKey(0)
+        cv2.waitKey(0)
 
     end_frame = min(len(prefixes), args.end_frame)
-
-    data = dict()
-    for idx in tqdm(range(args.start_frame, end_frame)):
-        prefix = prefixes[idx]
-        color_path = os.path.join(video_path, 'color', f'{prefix}.png')
-        depth_path = os.path.join(video_path, 'depth', f'{prefix}.png')
-        info_path = os.path.join(video_path, 'data', f'{prefix}.json')
-        data[prefix] = dict()
-
-        color_im = cv2.cvtColor(cv2.imread(color_path), cv2.COLOR_BGR2RGB)
-        depth_im = cv2.imread(depth_path, cv2.IMREAD_UNCHANGED).astype(np.float32) / data_cfg['depth_scale']
-        with open(info_path, 'r') as f:
-            info = json.load(f)
-        data[prefix]['color_im'] = color_im
-        data[prefix]['depth_im'] = depth_im
-        data[prefix]['info'] = info
 
     if args.save:
         os.makedirs(os.path.join(video_path, f'estimation_vis-{args.method}'), exist_ok=True)
         os.makedirs(os.path.join(video_path, f"estimation_cloud-{args.method}"), exist_ok=True)
 
+    total_time = 0
     for idx in tqdm(range(args.start_frame, end_frame)):
         prefix = prefixes[idx]
-        color_im = data[prefix]['color_im']
-        depth_im = data[prefix]['depth_im']
-        info = data[prefix]['info']
-        info['prefix'] = prefix
+        color_path = os.path.join(video_path, 'color', f'{prefix}.png')
+        depth_path = os.path.join(video_path, 'depth', f'{prefix}.png')
+        info_path = os.path.join(video_path, 'data', f'{prefix}.json')
+
+        color_im = cv2.cvtColor(cv2.imread(color_path), cv2.COLOR_BGR2RGB)
+        depth_im = cv2.imread(depth_path, cv2.IMREAD_UNCHANGED).astype(np.float32) / data_cfg['depth_scale']
+        with open(info_path, 'r') as f:
+            info = json.load(f)
 
         tic = time.time()
         tracker.update(color_im, depth_im, info)
-        # print(f"update takes: {time.time() - tic}s")
+        total_time += time.time() - tic
 
         if args.visualize:
             vis_im = tracker.get_2d_vis()
@@ -1021,6 +1003,7 @@ if __name__ == '__main__':
             if args.save:
                 cv2.imwrite(os.path.join(video_path, f'estimation_vis-{args.method}', f'{prefix}.jpg'), vis_im_bgr)
                 o3d.io.write_point_cloud(os.path.join(video_path, f"estimation_cloud-{args.method}", f"{idx:04d}.pcd"), tracker.get_3d_vis())
+    print(f"FPS: {(end_frame - args.start_frame + 1e-12) / total_time}")
 
     # save rod poses and end cap positions to file
     if args.save:
