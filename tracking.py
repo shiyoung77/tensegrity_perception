@@ -12,9 +12,9 @@ import numpy.linalg as la
 import cv2
 import networkx as nx
 import open3d as o3d
-from pyquaternion import Quaternion
 from scipy.optimize import minimize
 from scipy.spatial import KDTree
+from scipy.spatial.transform import Rotation
 from matplotlib import pyplot as plt
 from tqdm import tqdm
 import trimesh
@@ -164,15 +164,6 @@ class Tracker:
         complete_obs_color = np.zeros_like(color_im)
         complete_obs_depth = np.zeros_like(depth_im)
         complete_obs_mask = np.zeros((H, W), dtype=np.bool8)
-
-        if self.cfg.visualize:
-            hsv_im = cv2.cvtColor(color_im, cv2.COLOR_RGB2HSV)
-            _, axes = plt.subplots(2, 2)
-            axes[0, 0].imshow(color_im)
-            axes[0, 1].imshow(complete_obs_color)
-            axes[1, 0].imshow(hsv_im)
-            axes[1, 1].imshow(complete_obs_depth)
-            plt.show()
 
         # vis_rendered_pts = []
         # vis_obs_pts = []
@@ -738,8 +729,9 @@ class Tracker:
         cos_dist = prev_z_dir @ curr_z_dir
         if not np.allclose(cos_dist, 1):
             axis = np.cross(prev_z_dir, curr_z_dir)
+            axis = axis / la.norm(axis)
             angle = np.arccos(cos_dist)
-            delta_rot = Quaternion(axis=axis, angle=angle).rotation_matrix
+            delta_rot = Rotation.from_rotvec(angle * axis).as_matrix()
 
         curr_rod_pose = np.eye(4)
         curr_rod_pose[:3, :3] = delta_rot @ prev_rot
@@ -965,17 +957,11 @@ if __name__ == '__main__':
     tracker.initialize(color_im, depth_im, info, compute_hsv=False)
     data_cfg_module.write_config(tracker.data_cfg)
 
-    if args.visualize:
-        vis_im = tracker.get_2d_vis()
-        cv2.imshow("estimation", cv2.cvtColor(vis_im, cv2.COLOR_RGB2BGR))
-        cv2.waitKey(0)
-
-    end_frame = min(len(prefixes), args.end_frame)
-
     if args.save:
         os.makedirs(os.path.join(video_path, f'estimation_vis-{args.method}'), exist_ok=True)
         os.makedirs(os.path.join(video_path, f"estimation_cloud-{args.method}"), exist_ok=True)
 
+    end_frame = min(len(prefixes), args.end_frame)
     total_time = 0
     for idx in tqdm(range(args.start_frame, end_frame)):
         prefix = prefixes[idx]
