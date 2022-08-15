@@ -341,13 +341,17 @@ class Tracker:
             obs_pts = self.compute_obs_pts(depth_im, hsv_mask)
             obs_pts_dict[color] = obs_pts
 
-            prev_pose = self.G.edges[u, v]['pose_list'][-1].copy()
+            prev_pose = np.copy(self.G.edges[u, v]['pose_list'][-1])
             for i, node in enumerate([u, v]):
                 model_pcd = copy.deepcopy(self.endcap_meshes[i])
                 model_pcd.transform(prev_pose)
                 _, pt_map = model_pcd.hidden_point_removal([0, 0, 0], radius=0.001)
                 model_pcd = model_pcd.select_by_index(pt_map, invert=True)
                 model_pcd_dict[node] = model_pcd
+
+            self.G.edges[u, v]['pose_list'].append(prev_pose)
+            self.G.nodes[u]['pos_list'].append(prev_pose[:3, 3] + prev_pose[:3, 2] * self.rod_length / 2)
+            self.G.nodes[v]['pos_list'].append(prev_pose[:3, 3] - prev_pose[:3, 2] * self.rod_length / 2)
 
             # prev_pose = self.G.edges[u, v]['pose_list'][-1].copy()
             # mesh_nodes[self.create_scene_node(f"node-{u}", self.endcap_meshes[0], prev_pose)] = u + 1
@@ -372,6 +376,10 @@ class Tracker:
         #     model_pcd_dict[v] = v_pcd
 
         for iter, max_distance in enumerate(self.cfg.max_correspondence_distances):
+            prev_poses = {}
+            for color, (u, v) in self.data_cfg['color_to_rod'].items():
+                prev_poses[color] = np.copy(self.G.edges[u, v]['pose_list'][-1])
+
             # ================================== prediction step ==================================
             tic = time.time()
             for color, (u, v) in self.data_cfg['color_to_rod'].items():
@@ -400,21 +408,12 @@ class Tracker:
                     rendered_w = np.ones(rendered_pts.shape[0])
                     rendered_w[-2:] = self.cfg.dummy_weights * self.cfg.num_dummy_points
 
-                prev_pose = np.copy(self.G.edges[u, v]['pose_list'][-1])
                 delta_T = self.register(obs_pts, rendered_pts, obs_w, rendered_w, max_distance)
-                rod_pose = delta_T @ prev_pose
+                rod_pose = delta_T @ prev_poses[color]
 
-                model_pcd_dict[u].transform(delta_T)
-                model_pcd_dict[v].transform(delta_T)
-
-                if iter == 0:
-                    self.G.edges[u, v]['pose_list'].append(rod_pose)
-                    self.G.nodes[u]['pos_list'].append(rod_pose[:3, 3] + rod_pose[:3, 2] * self.rod_length / 2)
-                    self.G.nodes[v]['pos_list'].append(rod_pose[:3, 3] - rod_pose[:3, 2] * self.rod_length / 2)
-                else:
-                    self.G.edges[u, v]['pose_list'][-1] = rod_pose
-                    self.G.nodes[u]['pos_list'][-1] = rod_pose[:3, 3] + rod_pose[:3, 2] * self.rod_length / 2
-                    self.G.nodes[v]['pos_list'][-1] = rod_pose[:3, 3] - rod_pose[:3, 2] * self.rod_length / 2
+                self.G.edges[u, v]['pose_list'][-1] = rod_pose
+                self.G.nodes[u]['pos_list'][-1] = rod_pose[:3, 3] + rod_pose[:3, 2] * self.rod_length / 2
+                self.G.nodes[v]['pos_list'][-1] = rod_pose[:3, 3] - rod_pose[:3, 2] * self.rod_length / 2
 
                 # self.G.nodes[u]['confidence'] = self.compute_confidence(u_obs_pts, u_rendered_pts, num_thresh=50, inlier_thresh=0.02)
                 # self.G.nodes[v]['confidence'] = self.compute_confidence(v_obs_pts, v_rendered_pts, num_thresh=50, inlier_thresh=0.02)
@@ -426,6 +425,13 @@ class Tracker:
                 tic = time.time()
                 self.constrained_optimization(info)
                 # print(f"optimization takes {time.time() - tic}s")
+            
+            for color, (u, v) in self.data_cfg['color_to_rod'].items():
+                prev_pose = prev_poses[color]
+                curr_pose = self.G.edges[u, v]['pose_list'][-1]
+                delta_T = curr_pose @ la.inv(prev_pose)
+                model_pcd_dict[u].transform(delta_T)
+                model_pcd_dict[v].transform(delta_T)
         return
 
 
