@@ -231,7 +231,8 @@ class Tracker:
             # mesh_nodes = [self.create_scene_node(str(i), self.endcap_meshes[i], init_pose) for i in range(2)]
             # rendered_depth_im = self.render_nodes(mesh_nodes, depth_only=True)
             # rendered_pts, _ = self.back_projection(torch.from_numpy(rendered_depth_im).cuda())
-            rod_pose = self.register(obs_pts, rendered_pts, init_pose, max_distance=0.1)
+            delta_T = self.register(obs_pts, rendered_pts, max_distance=0.1)
+            rod_pose = delta_T @ init_pose
 
             # vis_obs_pts.append(Q)
             # vis_rendered_pts.append(P)
@@ -400,11 +401,11 @@ class Tracker:
                     rendered_w[-2:] = self.cfg.dummy_weights * self.cfg.num_dummy_points
 
                 prev_pose = np.copy(self.G.edges[u, v]['pose_list'][-1])
-                rod_pose = self.register(obs_pts, rendered_pts, prev_pose, obs_w=obs_w, rendered_w=rendered_w,
-                                         max_distance=max_distance)
+                delta_T = self.register(obs_pts, rendered_pts, obs_w, rendered_w, max_distance)
+                rod_pose = delta_T @ prev_pose
 
-                model_pcd_dict[u].transform(rod_pose @ la.inv(prev_pose))
-                model_pcd_dict[v].transform(rod_pose @ la.inv(prev_pose))
+                model_pcd_dict[u].transform(delta_T)
+                model_pcd_dict[v].transform(delta_T)
 
                 if iter == 0:
                     self.G.edges[u, v]['pose_list'].append(rod_pose)
@@ -739,7 +740,7 @@ class Tracker:
         return curr_rod_pose
 
 
-    def register(self, obs_pts, rendered_pts, init_pose, obs_w=None, rendered_w=None, max_distance=0.02):
+    def register(self, obs_pts, rendered_pts, obs_w=None, rendered_w=None, max_distance=0.02):
         if obs_w is None:
             obs_w = np.ones(obs_pts.shape[0])
         if rendered_w is None:
@@ -774,16 +775,13 @@ class Tracker:
         # ensure that R is in the right-hand coordinate system, very important!!!
         # https://en.wikipedia.org/wiki/Kabsch_algorithm
         d = np.sign(la.det(U @ V_t))
-        R = U @ np.array([
-            [1, 0, 0],
-            [0, 1, 0],
-            [0, 0, d]
-        ], dtype=np.float64) @ V_t
+        U[:, -1] = d * U[:, -1]
+        R = U @ V_t
         t = Q_mean - R @ P_mean
-        delta_T = np.eye(4, dtype=np.float64)
-        delta_T[:3, :3] = R
-        delta_T[:3, 3] = t
-        return delta_T @ init_pose
+        T = np.eye(4, dtype=np.float64)
+        T[:3, :3] = R
+        T[:3, 3] = t
+        return T
 
 
     # https://math.stackexchange.com/questions/1993953/closest-points-between-two-lines
