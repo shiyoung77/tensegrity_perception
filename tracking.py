@@ -198,7 +198,7 @@ class Tracker:
                 # filter observable endcap points by z coordinates
                 if self.cfg.filter_observed_pts:
                     zs = endcap_pts[:, 2]
-                    z_min = np.percentile(zs, q=10, method="lower")
+                    z_min = np.percentile(zs, q=10)
                     endcap_pts = endcap_pts[zs < z_min + 0.02]
                     endcap_center = endcap_pts.mean(0)
 
@@ -307,12 +307,12 @@ class Tracker:
         # filter points based on depth
         if u_pts.shape[0] > 0:
             zs = u_pts[:, 2]
-            z_min = np.percentile(zs, q=10, method="lower")
+            z_min = np.percentile(zs, q=10)
             u_pts = u_pts[zs < z_min + thresh]
 
         if v_pts.shape[0] > 0:
             zs = v_pts[:, 2]
-            z_min = np.percentile(zs, q=10, method="lower")
+            z_min = np.percentile(zs, q=10)
             v_pts = v_pts[zs < z_min + thresh]
 
         return u_pts, v_pts
@@ -358,11 +358,11 @@ class Tracker:
             # mesh_nodes[self.create_scene_node(f"node-{v}", self.endcap_meshes[1], prev_pose)] = v + 1
 
             if color == 'red':
-                self.obs_vis[:, :, 0][hsv_mask] = 255
+                self.obs_vis[hsv_mask, 0] = 255
             elif color == 'green':
-                self.obs_vis[:, :, 1][hsv_mask] = 255
+                self.obs_vis[hsv_mask, 1] = 255
             elif color == 'blue':
-                self.obs_vis[:, :, 2][hsv_mask] = 255
+                self.obs_vis[hsv_mask, 2] = 255
 
         # rendered_seg, rendered_depth = self.render_nodes(mesh_nodes, depth_only=False)
         # rendered_seg_gpu = torch.from_numpy(rendered_seg).cuda()
