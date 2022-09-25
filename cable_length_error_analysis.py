@@ -12,7 +12,7 @@ from matplotlib import pyplot as plt
 if __name__ == '__main__':
     parser = ArgumentParser("pose evalutation")
     parser.add_argument("--dataset", default="dataset")
-    parser.add_argument("-v", "--video", default="monday_roll15")
+    parser.add_argument("-v", "--video", default="0016")
     parser.add_argument("--start_frame", default=0, type=int)
     parser.add_argument("--end_frame", default=1000, type=int)
     parser.add_argument("--num_endcaps", default=6, type=int)
@@ -74,7 +74,7 @@ if __name__ == '__main__':
 
     fig, axes = plt.subplots(3, 3)
     fig.set_size_inches(16, 12)
-    fig.suptitle(f"Distance between Endcaps for Video: '{args.video}'")
+    fig.suptitle(f"Distance between Endcaps for Video: '{args.video}'", fontsize=16)
     fig.subplots_adjust(top=0.92)
     for sensor_id in data_cfg['sensor_to_tendon']:
         row = int(sensor_id) // 3
@@ -82,10 +82,11 @@ if __name__ == '__main__':
         axes[row, col].plot(range(N), np.array(predicted_dist[sensor_id])*100, label='Proposed')
         axes[row, col].plot(range(N), np.array(measured_dist[sensor_id])*100, label='Measured')
         axes[row, col].plot(range(N), np.array(mocap_dist[sensor_id])*100, label='GT')
-        axes[row, col].legend(loc='best')
-        axes[row, col].set_xlabel("Frame Index", fontsize=12)
-        axes[row, col].set_ylabel("Distance (cm)", fontsize=12)
-        axes[row, col].set_title(f"Sensor ID: {sensor_id}")
+        # axes[row, col].legend(loc='best', fontsize=16)
+        axes[row, col].set_xlabel("Frame Index", fontsize=16)
+        axes[row, col].set_ylabel("Distance (cm)", fontsize=16)
+        axes[row, col].set_title(f"Sensor ID: {sensor_id}", fontsize=16)
+        axes[row, col].tick_params(axis='both', which='major', labelsize=16)
     plt.subplots_adjust(wspace=0.2, hspace=0.4)
     plt.savefig(os.path.join(args.dataset, args.video, "error_analysis", "cable_length.png"), dpi=150)
 

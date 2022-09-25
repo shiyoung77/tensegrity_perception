@@ -375,6 +375,17 @@ class Tracker:
         #     model_pcd_dict[u] = u_pcd
         #     model_pcd_dict[v] = v_pcd
 
+        key_frames = ['0089']
+
+        if info["prefix"] in key_frames:
+            vis_im = tracker.get_2d_vis()
+            vis_im_bgr = cv2.cvtColor(vis_im, cv2.COLOR_RGB2BGR)
+            # cv2.putText(vis_im_bgr, info['prefix'], (150, 25), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 255), 2, cv2.LINE_AA)
+            cv2.imshow("estimation", vis_im_bgr)
+            key = cv2.waitKey(0)
+            if key == ord('q'):
+                exit(0)
+
         for iter, max_distance in enumerate(self.cfg.max_correspondence_distances):
             prev_poses = {}
             for color, (u, v) in self.data_cfg['color_to_rod'].items():
@@ -396,6 +407,7 @@ class Tracker:
                     u_obs_pts, v_obs_pts = self.filter_obs_pts(obs_pts, color, radius=max_distance, thresh=np.inf)
 
                 # add dummy points at the previous endcap position
+                # if self.cfg.add_dummy_points and info['prefix'] not in key_frames:
                 if self.cfg.add_dummy_points:
                     u_dummy = self.G.nodes[u]['pos_list'][-1]
                     v_dummy = self.G.nodes[v]['pos_list'][-1]
@@ -407,6 +419,11 @@ class Tracker:
                     rendered_pts = np.vstack([u_rendered_pts, v_rendered_pts, u_dummy, v_dummy])
                     rendered_w = np.ones(rendered_pts.shape[0])
                     rendered_w[-2:] = self.cfg.dummy_weights * self.cfg.num_dummy_points
+                else:
+                    obs_pts = np.vstack([u_obs_pts, v_obs_pts])
+                    obs_w = np.ones(obs_pts.shape[0])
+                    rendered_pts = np.vstack([u_rendered_pts, v_rendered_pts])
+                    rendered_w = np.ones(rendered_pts.shape[0])
 
                 delta_T = self.register(obs_pts, rendered_pts, obs_w, rendered_w, max_distance)
                 rod_pose = delta_T @ prev_poses[color]
@@ -420,18 +437,41 @@ class Tracker:
 
             # print(f"point registration takes {time.time() - tic}s")
 
+            if info["prefix"] in key_frames:
+                vis_im = tracker.get_2d_vis()
+                vis_im_bgr = cv2.cvtColor(vis_im, cv2.COLOR_RGB2BGR)
+                cv2.putText(vis_im_bgr, f"{iter = }", (150, 25), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2, cv2.LINE_AA)
+                cv2.putText(vis_im_bgr, "step 1", (225, 25), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 255), 2, cv2.LINE_AA)
+                cv2.imshow("estimation", vis_im_bgr)
+                key = cv2.waitKey(0)
+                if key == ord('q'):
+                    exit(0)
+
             # ================================== correction step ==================================
-            if iter % 2 == 0 and self.cfg.add_constrained_optimization:
+            if self.cfg.add_constrained_optimization:
+            # if self.cfg.add_constrained_optimization and info['prefix'] not in key_frames:
+            # if iter % 2 == 0 and self.cfg.add_constrained_optimization:
                 tic = time.time()
                 self.constrained_optimization(info)
                 # print(f"optimization takes {time.time() - tic}s")
-            
+
             for color, (u, v) in self.data_cfg['color_to_rod'].items():
                 prev_pose = prev_poses[color]
                 curr_pose = self.G.edges[u, v]['pose_list'][-1]
                 delta_T = curr_pose @ la.inv(prev_pose)
                 model_pcd_dict[u].transform(delta_T)
                 model_pcd_dict[v].transform(delta_T)
+
+            if info["prefix"] in key_frames:
+                vis_im = tracker.get_2d_vis()
+                vis_im_bgr = cv2.cvtColor(vis_im, cv2.COLOR_RGB2BGR)
+                cv2.putText(vis_im_bgr, f"{iter = }", (150, 25), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2, cv2.LINE_AA)
+                cv2.putText(vis_im_bgr, "step 2", (225, 25), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 0, 0), 2, cv2.LINE_AA)
+                cv2.imshow("estimation", vis_im_bgr)
+                key = cv2.waitKey(0)
+                if key == ord('q'):
+                    exit(0)
+
         return
 
 
@@ -874,7 +914,7 @@ class Tracker:
         vis_im[H:, :W] = tracker.obs_vis
         vis_im[:H, W:] = vis_im1
         vis_im[H:, W:] = vis_im2
-        return vis_im
+        return vis_im1
 
 
     def get_3d_vis(self):
@@ -977,6 +1017,7 @@ if __name__ == '__main__':
         depth_im = cv2.imread(depth_path, cv2.IMREAD_UNCHANGED).astype(np.float32) / data_cfg['depth_scale']
         with open(info_path, 'r') as f:
             info = json.load(f)
+        info['prefix'] = prefix
 
         tic = time.time()
         tracker.update(color_im, depth_im, info)
@@ -986,7 +1027,7 @@ if __name__ == '__main__':
             vis_im = tracker.get_2d_vis()
             vis_im_bgr = cv2.cvtColor(vis_im, cv2.COLOR_RGB2BGR)
             cv2.imshow("estimation", vis_im_bgr)
-            key = cv2.waitKey(1)
+            key = cv2.waitKey(0)
             if key == ord('q'):
                 exit(0)
 

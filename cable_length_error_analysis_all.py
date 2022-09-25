@@ -61,7 +61,7 @@ def eval_single_video(args, video, method, measured_errors, predicted_errors):
 if __name__ == '__main__':
     parser = ArgumentParser("pose evalutation")
     parser.add_argument("--dataset", default="dataset")
-    parser.add_argument("-v", "--video", default="monday_roll15")
+    parser.add_argument("-v", "--video", default="0016")
     parser.add_argument("--method", default="proposed")
     parser.add_argument("--start_frame", default=0, type=int)
     parser.add_argument("--end_frame", default=1000, type=int)
