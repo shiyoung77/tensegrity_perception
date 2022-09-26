@@ -1,4 +1,5 @@
 import os
+# os.environ["PYOPENGL_PLATFORM"] = 'egl'
 import time
 import copy
 import importlib
@@ -198,7 +199,7 @@ class Tracker:
                 # filter observable endcap points by z coordinates
                 if self.cfg.filter_observed_pts:
                     zs = endcap_pts[:, 2]
-                    z_min = np.percentile(zs, q=10, method="lower")
+                    z_min = np.percentile(zs, q=10)
                     endcap_pts = endcap_pts[zs < z_min + 0.02]
                     endcap_center = endcap_pts.mean(0)
 
@@ -307,12 +308,12 @@ class Tracker:
         # filter points based on depth
         if u_pts.shape[0] > 0:
             zs = u_pts[:, 2]
-            z_min = np.percentile(zs, q=10, method="lower")
+            z_min = np.percentile(zs, q=10)
             u_pts = u_pts[zs < z_min + thresh]
 
         if v_pts.shape[0] > 0:
             zs = v_pts[:, 2]
-            z_min = np.percentile(zs, q=10, method="lower")
+            z_min = np.percentile(zs, q=10)
             v_pts = v_pts[zs < z_min + thresh]
 
         return u_pts, v_pts
