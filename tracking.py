@@ -1,5 +1,5 @@
 import os
-# os.environ["PYOPENGL_PLATFORM"] = 'egl'
+os.environ["PYOPENGL_PLATFORM"] = 'osmesa'
 import time
 import copy
 import importlib
@@ -376,16 +376,22 @@ class Tracker:
         #     model_pcd_dict[u] = u_pcd
         #     model_pcd_dict[v] = v_pcd
 
-        key_frames = ['0089']
+        # key_frames = []
+        # key_frames = ['0089']
+        # vis_folder = "vis_icp"
+        # os.makedirs(vis_folder, exist_ok=True)
 
-        if info["prefix"] in key_frames:
-            vis_im = tracker.get_2d_vis()
-            vis_im_bgr = cv2.cvtColor(vis_im, cv2.COLOR_RGB2BGR)
-            # cv2.putText(vis_im_bgr, info['prefix'], (150, 25), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 255), 2, cv2.LINE_AA)
-            cv2.imshow("estimation", vis_im_bgr)
-            key = cv2.waitKey(0)
-            if key == ord('q'):
-                exit(0)
+        # count = 0
+        # if info["prefix"] in key_frames:
+        #     vis_im = tracker.get_2d_vis()
+        #     vis_im_bgr = cv2.cvtColor(vis_im, cv2.COLOR_RGB2BGR)
+        #     # cv2.putText(vis_im_bgr, info['prefix'], (150, 25), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 255), 2, cv2.LINE_AA)
+        #     cv2.imshow("estimation", vis_im_bgr)
+        #     cv2.imwrite(os.path.join(vis_folder, f"{count:04d}.jpg"), vis_im_bgr)
+        #     count += 1
+        #     key = cv2.waitKey(0)
+        #     if key == ord('q'):
+        #         exit(0)
 
         for iter, max_distance in enumerate(self.cfg.max_correspondence_distances):
             prev_poses = {}
@@ -438,15 +444,20 @@ class Tracker:
 
             # print(f"point registration takes {time.time() - tic}s")
 
-            if info["prefix"] in key_frames:
-                vis_im = tracker.get_2d_vis()
-                vis_im_bgr = cv2.cvtColor(vis_im, cv2.COLOR_RGB2BGR)
-                cv2.putText(vis_im_bgr, f"{iter = }", (150, 25), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2, cv2.LINE_AA)
-                cv2.putText(vis_im_bgr, "step 1", (225, 25), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 255), 2, cv2.LINE_AA)
-                cv2.imshow("estimation", vis_im_bgr)
-                key = cv2.waitKey(0)
-                if key == ord('q'):
-                    exit(0)
+            # if info["prefix"] in key_frames:
+            #     vis_im = tracker.get_2d_vis()
+            #     vis_im_bgr = cv2.cvtColor(vis_im, cv2.COLOR_RGB2BGR)
+            #     cv2.putText(vis_im_bgr, f"{iter = }", (280, 25), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2, cv2.LINE_AA)
+            #     # cv2.putText(vis_im_bgr, "step 1", (430, 25), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 255), 2, cv2.LINE_AA)
+            #     # cv2.putText(vis_im_bgr, "step 1", (430, 25), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 255), 2, cv2.LINE_AA)
+            #     cv2.imshow("estimation", vis_im_bgr)
+            #     # pcd_vis = self.get_3d_vis()
+            #     # o3d.visualization.draw_geometries([pcd_vis])
+            #     cv2.imwrite(os.path.join(vis_folder, f"{count:04d}.jpg"), vis_im_bgr)
+            #     count += 1
+            #     key = cv2.waitKey(0)
+            #     if key == ord('q'):
+            #         exit(0)
 
             # ================================== correction step ==================================
             if self.cfg.add_constrained_optimization:
@@ -463,15 +474,17 @@ class Tracker:
                 model_pcd_dict[u].transform(delta_T)
                 model_pcd_dict[v].transform(delta_T)
 
-            if info["prefix"] in key_frames:
-                vis_im = tracker.get_2d_vis()
-                vis_im_bgr = cv2.cvtColor(vis_im, cv2.COLOR_RGB2BGR)
-                cv2.putText(vis_im_bgr, f"{iter = }", (150, 25), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2, cv2.LINE_AA)
-                cv2.putText(vis_im_bgr, "step 2", (225, 25), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 0, 0), 2, cv2.LINE_AA)
-                cv2.imshow("estimation", vis_im_bgr)
-                key = cv2.waitKey(0)
-                if key == ord('q'):
-                    exit(0)
+            # if info["prefix"] in key_frames:
+            #     vis_im = tracker.get_2d_vis()
+            #     vis_im_bgr = cv2.cvtColor(vis_im, cv2.COLOR_RGB2BGR)
+            #     cv2.putText(vis_im_bgr, f"{iter = }", (280, 25), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2, cv2.LINE_AA)
+            #     cv2.putText(vis_im_bgr, "step 2", (430, 25), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 50, 0), 2, cv2.LINE_AA)
+            #     cv2.imwrite(os.path.join(vis_folder, f"{count:04d}.jpg"), vis_im_bgr)
+            #     count += 1
+            #     cv2.imshow("estimation", vis_im_bgr)
+            #     key = cv2.waitKey(0)
+            #     if key == ord('q'):
+            #         exit(0)
 
         return
 
@@ -908,7 +921,7 @@ class Tracker:
         for i, color in enumerate(['red', 'green', 'blue']):
             mask = rendered_depth.copy()
             mask[rendered_seg != i + 1] = 0
-            vis_im1[depth_im < mask] = Tracker.ColorDict[color]
+            vis_im1[(mask > 0) & (depth_im > mask)] = Tracker.ColorDict[color]
             vis_im2[mask > 0] = Tracker.ColorDict[color]
         vis_im = np.empty((H*2, W*2, 3), dtype=np.uint8)
         vis_im[:H, :W] = self.color_im
@@ -1024,7 +1037,7 @@ if __name__ == '__main__':
         tracker.update(color_im, depth_im, info)
         total_time += time.time() - tic
 
-        if args.visualize:
+        if args.visualize and prefix == '0089':
             vis_im = tracker.get_2d_vis()
             vis_im_bgr = cv2.cvtColor(vis_im, cv2.COLOR_RGB2BGR)
             cv2.imshow("estimation", vis_im_bgr)

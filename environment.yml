@@ -58,4 +58,3 @@ dependencies:
     - tqdm==4.64.0
     - trimesh==3.12.5
     - urllib3==1.26.9
-prefix: /home/lsy/anaconda3/envs/tensegrity
