@@ -1,13 +1,27 @@
 #!/bin/bash
 
 DATASET="dataset"
-VIDEO_LIST=({0001..0016})
-# VIDEO_LIST=(may5_3)
+
+# VIDEO_LIST=({0001..0016})
+# VIDEO_LIST=($(ls $DATASET))
+VIDEO_LIST=("456foot_cw_3")
+# VIDEO_LIST=($(ls $DATASET | grep -E "20deg"))
+
 METHOD="proposed"
 START_FRAME=0
-END_FRAME=1000  # exclusive
+END_FRAME=10000  # exclusive
+
+echo ${VIDEO_LIST[@]}
+echo "# videos: ${#VIDEO_LIST[@]}"
 
 for VIDEO in ${VIDEO_LIST[@]}; do
+    if [[ $VIDEO == "" ]]
+    then
+        continue
+    fi
+    echo $VIDEO
+
+    # PYOPENGL_PLATFORM="osmesa" python tracking.py \
     python tracking.py \
         --dataset $DATASET \
         --video $VIDEO \
@@ -17,23 +31,36 @@ for VIDEO in ${VIDEO_LIST[@]}; do
         --method $METHOD \
         --start_frame $START_FRAME \
         --end_frame $END_FRAME \
-        --add_dummy_points \
         --num_dummy_points 50 \
         --dummy_weights 0.5 \
-        --render_scale 2 \
-        --max_correspondence_distances 0.3 0.25 0.2 0.15 0.1 0.06 0.03 \
-        --add_constrained_optimization \
+        --render_scale 1 \
+        --max_correspondence_distances 0.3 0.25 0.2 0.15 0.1 0.07 0.05 \
+        --use_adaptive_weights \
+        --optimize_every_n_iters 2 \
         --add_ground_constraints \
         --add_physical_constraints \
         --filter_observed_pts \
         --visualize \
-        # --save
+        --save
+        # --max_correspondence_distances 0.3 0.3 0.25 0.25 0.2 0.2 0.15 0.1 0.1 0.07 0.05 0.04 0.03 \
+
+    # ffmpeg -r 30 -i "$DATASET/$VIDEO/estimation_vis-${METHOD}/%04d.jpg" \
+    #     -start_number $START_FRAME \
+    #     -vframes $(expr $END_FRAME - $START_FRAME) \
+    #     "$DATASET/$VIDEO/estimation.mp4"
+
+    # ffmpeg -i $DATASET/$VIDEO/estimation.mp4 \
+    #     -t 20 \
+    #     -vf "fps=10,scale=960:240:flags=lanczos,split[s0][s1];[s0]palettegen[p];[s1][p]paletteuse" \
+    #     -loop 0 \
+    #     $DATASET/$VIDEO/$VIDEO.gif
+
+    # mkdir -p ~/dataset/dusk_results
+    # cp -r $DATASET/$VIDEO/poses-proposed $DATASET/$VIDEO/estimation.mp4 $DATASET/$VIDEO/config.json --parents ~/dataset/dusk_results
+
+    # break
 done
 
-# ffmpeg -r 10 -i "$DATASET/$VIDEO/estimation_vis-${METHOD}/%04d.png" \
-#     -start_number $START_FRAME \
-#     -vframes $(expr $END_FRAME - $START_FRAME) \
-#     "$DATASET/$VIDEO/estimation.mp4"
 
 # python compute_T_from_cam_to_mocap_manual.py \
 #     --dataset $DATASET \
