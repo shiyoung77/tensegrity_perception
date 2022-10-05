@@ -4,7 +4,7 @@ DATASET="dataset"
 
 # VIDEO_LIST=({0001..0016})
 # VIDEO_LIST=($(ls $DATASET))
-VIDEO_LIST=("456foot_cw_3")
+VIDEO_LIST=("pebbles9")
 # VIDEO_LIST=($(ls $DATASET | grep -E "20deg"))
 
 METHOD="proposed"
@@ -42,12 +42,11 @@ for VIDEO in ${VIDEO_LIST[@]}; do
         --filter_observed_pts \
         --visualize \
         --save
-        # --max_correspondence_distances 0.3 0.3 0.25 0.25 0.2 0.2 0.15 0.1 0.1 0.07 0.05 0.04 0.03 \
 
-    # ffmpeg -r 30 -i "$DATASET/$VIDEO/estimation_vis-${METHOD}/%04d.jpg" \
-    #     -start_number $START_FRAME \
-    #     -vframes $(expr $END_FRAME - $START_FRAME) \
-    #     "$DATASET/$VIDEO/estimation.mp4"
+    ffmpeg -r 30 -i "$DATASET/$VIDEO/estimation_vis-${METHOD}/%04d.jpg" \
+        -start_number $START_FRAME \
+        -vframes $(expr $END_FRAME - $START_FRAME) \
+        "$DATASET/$VIDEO/estimation.mp4"
 
     # ffmpeg -i $DATASET/$VIDEO/estimation.mp4 \
     #     -t 20 \

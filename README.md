@@ -11,12 +11,15 @@ This is the official repository for the paper "6N-DoF Pose Tracking for Tensegri
 2. `conda env create -f environment.yml`
 3. `conda activate tensegrity`
 
-## Dataset
-The dataset that is used in the experiment section could be downloaded from [here](https://drive.google.com/file/d/1UzOfJ6mC3cEGLbyEmspnyonsnr9eirTZ/view?usp=sharing). It contains 16 RGB-D videos and the corresponding distance measurements for each frame.
+## Demo Trajactories
+Some demo trajactories could be downloaded [here](https://drive.google.com/drive/folders/1yOGHYOyp2WcwmNYEdUFf0qF-UtWxj8Hh?usp=sharing).
 
 ## Usage
-1. Either unzip the dataset in the repository and change its name to "dataset", or create a soft link in the repository `ln -s PATH_TO_THE_DATASET dataset`
-2. A bash script named `tracking.sh` is provided, which contains commands to run the algorithm, evaluate, and generate videos for visualization.
+1. Create a `dataset` folder in the repository and place the demo trajectories inside.
+2. A bash script `tracking.sh` is provided, which contains commands to run the algorithm, evaluate, and generate videos for visualization.
+
+## (Deprecated)
+The original implementation (which requires CUDA and is much slower) accompanying the ISRR submission is in the `ISRR_version` branch.
 
 ## Citation
 ```
