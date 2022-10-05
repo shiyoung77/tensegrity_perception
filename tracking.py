@@ -128,12 +128,13 @@ class Tracker:
             def mouse_click_callback(event):
                 global endcap_id
                 endcap_color = self.G.nodes[endcap_id]['color']
-                if event.xdata and event.ydata:
+                point = get_point(event)
+                if point and point['pos_3d'][-1] != 0:
                     print("===========================================================================================")
                     print(f"#{endcap_id} endcap ({self.G.nodes[endcap_id]['color']})")
-                    point = get_point(event)
+                    pprint.pprint(point)
                     print("===========================================================================================")
-                    self.data_cfg['init_endcap_pos'][endcap_id] = point['pos_3d']
+                    self.data_cfg['init_endcap_pos'][str(endcap_id)] = point['pos_3d']
 
                     # check whether this point is in the HSV range of the endcap color
                     lowerb, upperb = self.data_cfg['hsv_ranges'][endcap_color]
@@ -154,8 +155,7 @@ class Tracker:
             fig.canvas.mpl_connect('button_press_event', mouse_click_callback)
             plt.show()
             
-        pprint.pprint(self.data_cfg['init_endcap_pos'])
-        
+        # -------------------- optimize once -------------------- 
         for _, (u, v) in self.data_cfg['color_to_rod'].items():
             self.G.nodes[u]['pos_list'].append(self.data_cfg['init_endcap_pos'][str(u)])
             self.G.nodes[v]['pos_list'].append(self.data_cfg['init_endcap_pos'][str(v)])
@@ -164,205 +164,15 @@ class Tracker:
         self.cfg.add_physical_constraints = False
         self.constrained_optimization(info)
         self.cfg.add_physical_constraints = add_physical_constraints
+        # -------------------------------------------------------
+
+        for _, (u, v) in self.data_cfg['color_to_rod'].items():
+            self.data_cfg['init_endcap_pos'][str(u)] = self.G.nodes[u]['pos_list'][0].tolist()
+            self.data_cfg['init_endcap_pos'][str(v)] = self.G.nodes[v]['pos_list'][0].tolist()
 
         if self.cfg.visualize:
             pcd = self.get_3d_vis()
             o3d.visualization.draw_geometries([pcd])
-
-        self.initialized = True
-
-
-    def initialize_old(self, rgb_im: np.ndarray, depth_im: np.ndarray, info: dict, compute_hsv: bool = True):
-        self.rgb_im = rgb_im
-        self.depth_im = depth_im
-
-        scene_pcd = create_pcd(depth_im, self.data_cfg['cam_intr'], rgb_im, depth_trunc=self.data_cfg['depth_trunc'])
-        if 'cam_extr' not in self.data_cfg:
-            plane_frame, _ = plane_detection_ransac(scene_pcd, inlier_thresh=0.003, visualize=self.cfg.visualize)
-            self.data_cfg['cam_extr'] = np.round(plane_frame, decimals=3)
-
-        # #### for "incline" dataset only
-        # pts = np.asarray(scene_pcd.points)
-        # cam_extr = np.array(self.data_cfg['cam_extr'])
-        # origin = cam_extr[:3, 3]
-        # plane_normal = cam_extr[:3, 2]
-        # dist = (pts - origin) @ plane_normal
-        # inlier_indices = np.nonzero(np.abs(dist) > 0.005)[0]
-        # filtered_scene = scene_pcd.select_by_index(inlier_indices)
-        # plane_frame, _ = plane_detection_ransac(filtered_scene, inlier_thresh=0.002, visualize=self.cfg.visualize)
-        # self.data_cfg['cam_extr'] = np.round(plane_frame, decimals=3)
-
-        if 'init_end_cap_rois' not in self.data_cfg:
-            color_im_bgr = cv2.cvtColor(rgb_im, cv2.COLOR_RGB2BGR)
-            endcap_rois = dict()
-            for u in self.G.nodes:
-                color = self.G.nodes[u]['color']
-                window_name = f'Select #{u} end cap ({color})'
-                endcap_roi = cv2.selectROI(window_name, color_im_bgr, fromCenter=False, showCrosshair=False)
-                cv2.destroyWindow(window_name)
-                endcap_rois[str(u)] = endcap_roi
-            self.data_cfg['init_end_cap_rois'] = endcap_rois
-
-        # visualize init bboxes
-        color_im_vis = rgb_im.copy()
-        for u in self.G.nodes:
-            color = self.G.nodes[u]['color']
-            roi = self.data_cfg['init_end_cap_rois'][str(u)]
-            pt1 = (int(roi[0]), int(roi[1]))
-            pt2 = (pt1[0] + int(roi[2]), pt1[1] + int(roi[3]))
-            cv2.rectangle(color_im_vis, pt1, pt2, Tracker.ColorDict[color], 2)
-        color_im_vis = cv2.cvtColor(color_im_vis, cv2.COLOR_RGB2BGR)
-
-        if self.cfg.visualize:
-            cv2.imshow("init bboxes", color_im_vis)
-            cv2.waitKey(0)
-            cv2.destroyWindow("init bboxes")
-
-        # calculate hsv histograms
-        if compute_hsv:
-            for color, (u, v) in self.data_cfg['color_to_rod'].items():
-                h_hist = np.zeros((256, 1))
-                s_hist = np.zeros((256, 1))
-                v_hist = np.zeros((256, 1))
-                for i in (u, v):
-                    roi = self.data_cfg['init_end_cap_rois'][str(i)]
-                    pt1 = (int(roi[0]), int(roi[1]))
-                    pt2 = (pt1[0] + int(roi[2]), pt1[1] + int(roi[3]))
-                    cropped_im = rgb_im[pt1[1]:pt2[1], pt1[0]:pt2[0]].copy()
-                    cropped_im_hsv = cv2.cvtColor(cropped_im, cv2.COLOR_RGB2HSV)
-                    h_hist += cv2.calcHist([cropped_im_hsv], [0], None, [256], [0, 256])
-                    s_hist += cv2.calcHist([cropped_im_hsv], [1], None, [256], [0, 256])
-                    v_hist += cv2.calcHist([cropped_im_hsv], [2], None, [256], [0, 256])
-
-                if self.cfg.visualize:
-                    plt.plot(h_hist, label='h', color='r')
-                    plt.plot(s_hist, label='s', color='g')
-                    plt.plot(v_hist, label='v', color='b')
-                    plt.xlim([0, 256])
-                    plt.title(color)
-                    plt.legend()
-                    plt.show()
-
-        # estimate init rod transformation
-        color_im_hsv = cv2.cvtColor(rgb_im, cv2.COLOR_RGB2HSV)
-        H, W, _ = color_im_hsv.shape
-
-        complete_obs_color = np.zeros_like(rgb_im)
-        complete_obs_depth = np.zeros_like(depth_im)
-        complete_obs_mask = np.zeros((H, W), dtype=np.bool8)
-
-        # vis_rendered_pts = []
-        # vis_obs_pts = []
-
-        for color, (u, v) in self.data_cfg['color_to_rod'].items():
-            endcap_centers = []
-            obs_depth_im = np.zeros_like(depth_im)
-
-            obs_pts = []
-            for node in (u, v):
-                roi = self.data_cfg['init_end_cap_rois'][str(node)]
-                pt1 = (int(roi[0]), int(roi[1]))
-                pt2 = (pt1[0] + int(roi[2]), pt1[1] + int(roi[3]))
-
-                mask = np.zeros((H, W), dtype=np.bool8)
-                mask[pt1[1]:pt2[1], pt1[0]:pt2[0]] = True
-                hsv_mask = cv2.inRange(color_im_hsv,
-                                       lowerb=tuple(self.data_cfg['hsv_ranges'][color][0]),
-                                       upperb=tuple(self.data_cfg['hsv_ranges'][color][1])).astype(np.bool8)
-                # if color == 'red':
-                #     hsv_mask |= cv2.inRange(color_im_hsv, lowerb=(0, 100, 25), upperb=(3, 255, 255)).astype(np.bool8)
-                mask &= hsv_mask
-                assert mask.sum() > 0, f"node {node} ({color}) has no points observable in the initial frame."
-                print(f"{color}-{u} has {mask.sum()} points.")
-                obs_depth_im[mask] = depth_im[mask]
-                masked_depth_im = depth_im * mask
-                complete_obs_mask |= mask
-
-                endcap_pcd = create_pcd(masked_depth_im, self.data_cfg['cam_intr'])
-                endcap_pts = np.asarray(endcap_pcd.points)
-
-                # filter observable endcap points by z coordinates
-                if self.cfg.filter_observed_pts:
-                    zs = endcap_pts[:, 2]
-                    z_min = np.percentile(zs, q=10)
-                    endcap_pts = endcap_pts[zs < z_min + 0.02]
-                    endcap_center = endcap_pts.mean(0)
-
-                # filter observable endcap point cloud by finding the largest cluster
-                # if color == "green":
-                #     labels = np.asarray(endcap_pcd.cluster_dbscan(eps=0.005, min_points=1, print_progress=False))
-                #     points_for_each_cluster = [(labels == label).sum() for label in range(labels.max() + 1)]
-                #     label = np.argmax(points_for_each_cluster)
-                #     masked_indices = np.where(labels == label)[0]
-                #     endcap_pcd = endcap_pcd.select_by_index(masked_indices)
-                #     endcap_center = np.asarray(endcap_pcd.points).mean(axis=0)
-
-                endcap_centers.append(endcap_center)
-                obs_pts.append(endcap_pts)
-
-            # icp refinement
-            obs_pts = np.vstack(obs_pts)
-            init_pose = self.estimate_rod_pose_from_endcap_centers(endcap_centers)
-
-            model = self.endcap_meshes[0] + self.endcap_meshes[1]
-            model.transform(init_pose)
-            _, pt_map = model.hidden_point_removal([0, 0, 0], radius=0.01)
-            model_pcd = model.select_by_index(pt_map, invert=True)
-            model_pcd.paint_uniform_color([1, 0, 0])
-            rendered_pts = np.asarray(model_pcd.points)
-            # unseen_pcd = model.select_by_index(pt_map, invert=False)
-            # unseen_pcd.paint_uniform_color([0, 0, 1])
-            # vis_pcd([model_pcd, unseen_pcd])
-
-            # mesh_nodes = [self.create_scene_node(str(i), self.endcap_meshes[i], init_pose) for i in range(2)]
-            # rendered_depth_im = self.render_nodes(mesh_nodes, depth_only=True)
-            # rendered_pts, _ = self.back_projection(torch.from_numpy(rendered_depth_im).cuda())
-            delta_T = self.register(obs_pts, rendered_pts, max_distance=0.1)
-            rod_pose = delta_T @ init_pose
-
-            # vis_obs_pts.append(Q)
-            # vis_rendered_pts.append(P)
-
-            self.G.edges[u, v]['pose_list'].append(rod_pose)
-            self.G.nodes[u]['pos_list'].append(rod_pose[:3, 3] + rod_pose[:3, 2] * self.rod_length / 2)
-            self.G.nodes[v]['pos_list'].append(rod_pose[:3, 3] - rod_pose[:3, 2] * self.rod_length / 2)
-
-        # vis_obs_pts = torch.vstack(vis_obs_pts).cpu().numpy()
-        # obs_pcd = o3d.geometry.PointCloud()
-        # obs_pcd.points = o3d.utility.Vector3dVector(vis_obs_pts)
-        # obs_pcd = obs_pcd.paint_uniform_color([0, 0, 0])
-        # vis_rendered_pts = torch.vstack(vis_rendered_pts).cpu().numpy()
-        # rendered_pcd = o3d.geometry.PointCloud()
-        # rendered_pcd.points = o3d.utility.Vector3dVector(vis_rendered_pts)
-        # o3d.visualization.draw_geometries([rendered_pcd, obs_pcd])
-
-        complete_obs_color[complete_obs_mask] = rgb_im[complete_obs_mask]
-        complete_obs_depth[complete_obs_mask] = depth_im[complete_obs_mask]
-
-        if self.cfg.optimize_every_n_iters != 0:
-            self.constrained_optimization(info)
-
-        if self.cfg.visualize:
-            hsv_im = cv2.cvtColor(rgb_im, cv2.COLOR_RGB2HSV)
-            _, axes = plt.subplots(2, 2)
-            axes[0, 0].imshow(rgb_im)
-            axes[0, 1].imshow(complete_obs_color)
-            axes[1, 0].imshow(hsv_im)
-            axes[1, 1].imshow(complete_obs_depth)
-            plt.show()
-
-            vis_geometries = [scene_pcd]
-            for color, (u, v) in self.data_cfg['color_to_rod'].items():
-                rod_pcd = copy.deepcopy(self.rod_pcd)
-                rod_pcd = rod_pcd.paint_uniform_color(np.array(Tracker.ColorDict[color]) / 255)
-                rod_pose = self.G.edges[u, v]['pose_list'][-1]
-                rod_pcd.transform(rod_pose)
-                vis_geometries.append(rod_pcd)
-            coord = o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.3)
-            coord.transform(self.data_cfg['cam_extr'])
-            vis_geometries.append(coord)
-            o3d.visualization.draw_geometries(vis_geometries)
-            # o3d.visualization.draw_geometries_with_editing(vis_geometries)
 
         self.initialized = True
 
