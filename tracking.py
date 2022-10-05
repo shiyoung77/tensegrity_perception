@@ -84,13 +84,99 @@ class Tracker:
             self.G.edges[u, v]['length'] = self.data_cfg['rod_length']
             self.G.edges[u, v]['color'] = color
             self.G.edges[u, v]['pose_list'] = []
+    
+
+    def initialize(self, rgb_im: np.ndarray, depth_im: np.ndarray, info: dict):
+        self.rgb_im = rgb_im
+        self.depth_im = depth_im
+        self.hsv_im = cv2.cvtColor(rgb_im, cv2.COLOR_RGB2HSV)
+
+        cam_intr = np.asarray(self.data_cfg['cam_intr'])
+        fx, fy, cx, cy = cam_intr[0, 0], cam_intr[1, 1], cam_intr[0, 2], cam_intr[1, 2]
+
+        scene_pcd = create_pcd(depth_im, self.data_cfg['cam_intr'], rgb_im, depth_trunc=self.data_cfg['depth_trunc'])
+        if 'cam_extr' not in self.data_cfg:
+            plane_frame, _ = plane_detection_ransac(scene_pcd, inlier_thresh=0.003, visualize=self.cfg.visualize)
+            self.data_cfg['cam_extr'] = np.round(plane_frame, decimals=3)
+
+        if 'init_endcap_pos' not in self.data_cfg:
+            self.data_cfg['init_endcap_pos'] = dict()
+            rgb_im_copy = np.copy(rgb_im)
+            fig, ax = plt.subplots(1, 1)
+            ax.imshow(rgb_im_copy)
+
+            global endcap_id
+            endcap_id = 0
+            endcap_color = self.G.nodes[endcap_id]['color']
+            plt.get_current_fig_manager().set_window_title(f"Select #{endcap_id} endcap ({endcap_color})")
+
+            def get_point(event):
+                if event.xdata and event.ydata:
+                    x = int(round(event.xdata))
+                    y = int(round(event.ydata))
+                    rgb = list(rgb_im_copy[y, x])
+                    hsv = list(self.hsv_im[y, x])
+                    Z = float(self.depth_im[y, x])
+                    X = float((x - cx) * Z / fx)
+                    Y = float((y - cy) * Z / fy)
+                    if Z == 0:
+                        print(f"2D pos: ({x}, {y}), 3D pos: N/A, rgb: {rgb}, hsv: {hsv}")
+                    else:
+                        print(f"2D pos: ({x}, {y}), 3D pos: ({X:.3f}, {Y:.3f}, {Z:.3f}), rgb: {rgb}, hsv: {hsv}")
+                    return {'pos_2d': [x, y], 'pos_3d': [X, Y, Z], 'rgb': rgb, 'hsv': hsv}
+            
+            def mouse_click_callback(event):
+                global endcap_id
+                endcap_color = self.G.nodes[endcap_id]['color']
+                if event.xdata and event.ydata:
+                    print("===========================================================================================")
+                    print(f"#{endcap_id} endcap ({self.G.nodes[endcap_id]['color']})")
+                    point = get_point(event)
+                    print("===========================================================================================")
+                    self.data_cfg['init_endcap_pos'][endcap_id] = point['pos_3d']
+
+                    # check whether this point is in the HSV range of the endcap color
+                    lowerb, upperb = self.data_cfg['hsv_ranges'][endcap_color]
+                    hsv = point['hsv']
+                    if np.any(hsv < np.asarray(lowerb)) or np.any(hsv > np.asarray(upperb)):
+                        info['node_confidence'][endcap_id] = 0
+                    else:
+                        info['node_confidence'][endcap_id] = 1
+
+                    endcap_id += 1
+                    if endcap_id < len(self.G.nodes):
+                        endcap_color = self.G.nodes[endcap_id]['color']
+                        plt.get_current_fig_manager().set_window_title(f"Select #{endcap_id} endcap ({endcap_color})")
+                    else:
+                        plt.close()
+
+            fig.canvas.mpl_connect('motion_notify_event', get_point)
+            fig.canvas.mpl_connect('button_press_event', mouse_click_callback)
+            plt.show()
+            
+        pprint.pprint(self.data_cfg['init_endcap_pos'])
+        
+        for _, (u, v) in self.data_cfg['color_to_rod'].items():
+            self.G.nodes[u]['pos_list'].append(self.data_cfg['init_endcap_pos'][str(u)])
+            self.G.nodes[v]['pos_list'].append(self.data_cfg['init_endcap_pos'][str(v)])
+
+        add_physical_constraints = self.cfg.add_physical_constraints
+        self.cfg.add_physical_constraints = False
+        self.constrained_optimization(info)
+        self.cfg.add_physical_constraints = add_physical_constraints
+
+        if self.cfg.visualize:
+            pcd = self.get_3d_vis()
+            o3d.visualization.draw_geometries([pcd])
+
+        self.initialized = True
 
 
-    def initialize(self, color_im: np.ndarray, depth_im: np.ndarray, info: dict, compute_hsv: bool = True):
-        self.color_im = color_im
+    def initialize_old(self, rgb_im: np.ndarray, depth_im: np.ndarray, info: dict, compute_hsv: bool = True):
+        self.rgb_im = rgb_im
         self.depth_im = depth_im
 
-        scene_pcd = create_pcd(depth_im, self.data_cfg['cam_intr'], color_im, depth_trunc=self.data_cfg['depth_trunc'])
+        scene_pcd = create_pcd(depth_im, self.data_cfg['cam_intr'], rgb_im, depth_trunc=self.data_cfg['depth_trunc'])
         if 'cam_extr' not in self.data_cfg:
             plane_frame, _ = plane_detection_ransac(scene_pcd, inlier_thresh=0.003, visualize=self.cfg.visualize)
             self.data_cfg['cam_extr'] = np.round(plane_frame, decimals=3)
@@ -107,7 +193,7 @@ class Tracker:
         # self.data_cfg['cam_extr'] = np.round(plane_frame, decimals=3)
 
         if 'init_end_cap_rois' not in self.data_cfg:
-            color_im_bgr = cv2.cvtColor(color_im, cv2.COLOR_RGB2BGR)
+            color_im_bgr = cv2.cvtColor(rgb_im, cv2.COLOR_RGB2BGR)
             endcap_rois = dict()
             for u in self.G.nodes:
                 color = self.G.nodes[u]['color']
@@ -118,7 +204,7 @@ class Tracker:
             self.data_cfg['init_end_cap_rois'] = endcap_rois
 
         # visualize init bboxes
-        color_im_vis = color_im.copy()
+        color_im_vis = rgb_im.copy()
         for u in self.G.nodes:
             color = self.G.nodes[u]['color']
             roi = self.data_cfg['init_end_cap_rois'][str(u)]
@@ -142,7 +228,7 @@ class Tracker:
                     roi = self.data_cfg['init_end_cap_rois'][str(i)]
                     pt1 = (int(roi[0]), int(roi[1]))
                     pt2 = (pt1[0] + int(roi[2]), pt1[1] + int(roi[3]))
-                    cropped_im = color_im[pt1[1]:pt2[1], pt1[0]:pt2[0]].copy()
+                    cropped_im = rgb_im[pt1[1]:pt2[1], pt1[0]:pt2[0]].copy()
                     cropped_im_hsv = cv2.cvtColor(cropped_im, cv2.COLOR_RGB2HSV)
                     h_hist += cv2.calcHist([cropped_im_hsv], [0], None, [256], [0, 256])
                     s_hist += cv2.calcHist([cropped_im_hsv], [1], None, [256], [0, 256])
@@ -158,10 +244,10 @@ class Tracker:
                     plt.show()
 
         # estimate init rod transformation
-        color_im_hsv = cv2.cvtColor(color_im, cv2.COLOR_RGB2HSV)
+        color_im_hsv = cv2.cvtColor(rgb_im, cv2.COLOR_RGB2HSV)
         H, W, _ = color_im_hsv.shape
 
-        complete_obs_color = np.zeros_like(color_im)
+        complete_obs_color = np.zeros_like(rgb_im)
         complete_obs_depth = np.zeros_like(depth_im)
         complete_obs_mask = np.zeros((H, W), dtype=np.bool8)
 
@@ -250,16 +336,16 @@ class Tracker:
         # rendered_pcd.points = o3d.utility.Vector3dVector(vis_rendered_pts)
         # o3d.visualization.draw_geometries([rendered_pcd, obs_pcd])
 
-        complete_obs_color[complete_obs_mask] = color_im[complete_obs_mask]
+        complete_obs_color[complete_obs_mask] = rgb_im[complete_obs_mask]
         complete_obs_depth[complete_obs_mask] = depth_im[complete_obs_mask]
 
-        if self.cfg.add_constrained_optimization:
+        if self.cfg.optimize_every_n_iters != 0:
             self.constrained_optimization(info)
 
         if self.cfg.visualize:
-            hsv_im = cv2.cvtColor(color_im, cv2.COLOR_RGB2HSV)
+            hsv_im = cv2.cvtColor(rgb_im, cv2.COLOR_RGB2HSV)
             _, axes = plt.subplots(2, 2)
-            axes[0, 0].imshow(color_im)
+            axes[0, 0].imshow(rgb_im)
             axes[0, 1].imshow(complete_obs_color)
             axes[1, 0].imshow(hsv_im)
             axes[1, 1].imshow(complete_obs_depth)
@@ -318,9 +404,9 @@ class Tracker:
         return u_pts, v_pts
 
 
-    def update(self, color_im, depth_im, info):
+    def update(self, rgb_im, depth_im, info):
         assert self.initialized, "[Error] You must first initialize the tracker!"
-        self.color_im = color_im
+        self.rgb_im = rgb_im
         self.depth_im = depth_im
 
         # get observed 3D points for both end caps of each rod
@@ -330,7 +416,7 @@ class Tracker:
 
         self.obs_vis = np.zeros_like(self.obs_vis)
         for color, (u, v) in self.data_cfg['color_to_rod'].items():
-            color_im_hsv = cv2.cvtColor(color_im, cv2.COLOR_RGB2HSV)
+            color_im_hsv = cv2.cvtColor(rgb_im, cv2.COLOR_RGB2HSV)
             hsv_mask = cv2.inRange(
                 color_im_hsv,
                 lowerb=tuple(self.data_cfg['hsv_ranges'][color][0]),
@@ -421,7 +507,7 @@ class Tracker:
             # print(f"point registration takes {time.time() - tic}s")
 
             # ================================== correction step ==================================
-            if iter % 2 == 0 and self.cfg.add_constrained_optimization:
+            if self.cfg.optimize_every_n_iters != 0 and iter % self.cfg.optimize_every_n_iters == 0:
                 tic = time.time()
                 self.constrained_optimization(info)
                 # print(f"optimization takes {time.time() - tic}s")
@@ -503,8 +589,7 @@ class Tracker:
         rod_length = self.data_cfg['rod_length']
         num_endcaps = 2 * self.data_cfg['num_rods']  # a rod has two end caps
 
-        sensor_measurement = info['sensors']
-        obj_func, jac_func = self.objective_function_generator(sensor_measurement)
+        obj_func, jac_func = self.objective_function_generator(info)
 
         init_values = np.zeros(3 * num_endcaps)
         for i in range(num_endcaps):
@@ -553,18 +638,23 @@ class Tracker:
 
         for i in range(num_endcaps):
             # sanity check in case the constraint optimization fails
-            if la.norm(res.x[(3 * i):(3 * i + 3)] - self.G.nodes[i]['pos_list'][-1]) < 0.1:
-                self.G.nodes[i]['pos_list'][-1] = res.x[(3 * i):(3 * i + 3)].copy()
-            else:
+            if la.norm(res.x[(3 * i):(3 * i + 3)] - self.G.nodes[i]['pos_list'][-1]) > 0.1:
                 print("Endcap position sanity check failed.")
+            self.G.nodes[i]['pos_list'][-1] = res.x[(3 * i):(3 * i + 3)].copy()
 
         for u, v in self.data_cfg['color_to_rod'].values():
-            prev_rod_pose = self.G.edges[u, v]['pose_list'][-1]
+            if self.G.edges[u, v]['pose_list']:
+                prev_rod_pose = self.G.edges[u, v]['pose_list'][-1]
+            else:
+                prev_rod_pose = None
             u_pos = self.G.nodes[u]['pos_list'][-1]
             v_pos = self.G.nodes[v]['pos_list'][-1]
             curr_endcap_centers = np.vstack([u_pos, v_pos])
             optimized_pose = self.estimate_rod_pose_from_endcap_centers(curr_endcap_centers, prev_rod_pose)
-            self.G.edges[u, v]['pose_list'][-1] = optimized_pose
+            if self.G.edges[u, v]['pose_list']:
+                self.G.edges[u, v]['pose_list'][-1] = optimized_pose
+            else:
+                self.G.edges[u, v]['pose_list'].append(optimized_pose)
 
 
     def ground_constraint_generator(self, u):
@@ -586,15 +676,18 @@ class Tracker:
         return constraint_function, jacobian_function
 
 
-    def objective_function_generator(self, sensor_measurement):
+    def objective_function_generator(self, info):
+        sensor_measurement = info['sensors']
+        node_confidence = info['node_confidence']
 
         def objective_function(X):
             unary_loss = 0
             for i in range(len(self.data_cfg['node_to_color'])):
                 pos_est = X[(3 * i):(3 * i + 3)]
                 pos_old = self.G.nodes[i]['pos_list'][-1]
+                confidence = node_confidence.get(i, 1)
                 # confidence = self.G.nodes[i].get('confidence', 1)
-                confidence = 1
+                # confidence = 1
                 unary_loss += confidence * np.sum((pos_est - pos_old)**2)
 
             binary_loss = 0
@@ -630,8 +723,9 @@ class Tracker:
             for i in range(len(self.data_cfg['node_to_color'])):
                 pos_est = X[3 * i : 3 * i + 3]
                 pos_old = self.G.nodes[i]['pos_list'][-1]
+                confidence = node_confidence.get(i, 1)
                 # confidence = self.G.nodes[i].get('confidence', 1)
-                confidence = 1
+                # confidence = 1
                 result[3 * i : 3 * i + 3] = 2 * confidence * (pos_est - pos_old)
 
             for sensor_id, (u, v) in self.data_cfg['sensor_to_tendon'].items():
@@ -862,15 +956,15 @@ class Tracker:
     def get_2d_vis(self):
         rendered_seg, rendered_depth = tracker.render_current_state()
         H, W = self.data_cfg['im_h'], self.data_cfg['im_w']
-        vis_im1 = np.copy(self.color_im)
-        vis_im2 = np.zeros_like(self.color_im)
+        vis_im1 = np.copy(self.rgb_im)
+        vis_im2 = np.zeros_like(self.rgb_im)
         for i, color in enumerate(['red', 'green', 'blue']):
             mask = rendered_depth.copy()
             mask[rendered_seg != i + 1] = 0
             vis_im1[depth_im < mask] = Tracker.ColorDict[color]
             vis_im2[mask > 0] = Tracker.ColorDict[color]
         vis_im = np.empty((H*2, W*2, 3), dtype=np.uint8)
-        vis_im[:H, :W] = self.color_im
+        vis_im[:H, :W] = self.rgb_im
         vis_im[H:, :W] = tracker.obs_vis
         vis_im[:H, W:] = vis_im1
         vis_im[H:, W:] = vis_im2
@@ -886,7 +980,7 @@ class Tracker:
             rod_pcd.transform(rod_pose)
             robot_pcd += rod_pcd
 
-        scene_pcd = create_pcd(depth_im, data_cfg['cam_intr'], color_im, depth_trunc=data_cfg['depth_trunc'])
+        scene_pcd = create_pcd(self.depth_im, data_cfg['cam_intr'], self.rgb_im, depth_trunc=data_cfg['depth_trunc'])
         robot_pts = np.asarray(robot_pcd.points)
         bbox = o3d.geometry.AxisAlignedBoundingBox()
         bbox.min_bound = robot_pts.min(axis=0) - 0.05
@@ -910,8 +1004,8 @@ if __name__ == '__main__':
     parser.add_argument("--add_dummy_points", action="store_true")
     parser.add_argument("--num_dummy_points", type=int, default=50)
     parser.add_argument("--dummy_weights", type=float, default=0.1)
+    parser.add_argument("--optimize_every_n_iters", type=int, default=1)
     parser.add_argument("--filter_observed_pts", action="store_true")
-    parser.add_argument("--add_constrained_optimization", action="store_true")
     parser.add_argument("--add_physical_constraints", action="store_true")
     parser.add_argument("--add_ground_constraints", action="store_true")
     parser.add_argument("--save", action="store_true", help="save observation and qualitative results")
@@ -953,12 +1047,13 @@ if __name__ == '__main__':
     color_path = os.path.join(video_path, 'color', f'{prefixes[args.start_frame]}.png')
     depth_path = os.path.join(video_path, 'depth', f'{prefixes[args.start_frame]}.png')
     info_path = os.path.join(video_path, 'data', f'{prefixes[args.start_frame]}.json')
-    color_im = cv2.cvtColor(cv2.imread(color_path), cv2.COLOR_BGR2RGB)
+    rgb_im = cv2.cvtColor(cv2.imread(color_path), cv2.COLOR_BGR2RGB)
     depth_im = cv2.imread(depth_path, cv2.IMREAD_UNCHANGED).astype(np.float32) / data_cfg['depth_scale']
     with open(info_path, 'r') as f:
         info = json.load(f)
+    info['node_confidence'] = dict()
 
-    tracker.initialize(color_im, depth_im, info, compute_hsv=False)
+    tracker.initialize(rgb_im, depth_im, info)
     data_cfg_module.write_config(tracker.data_cfg)
 
     if args.save:
@@ -973,13 +1068,14 @@ if __name__ == '__main__':
         depth_path = os.path.join(video_path, 'depth', f'{prefix}.png')
         info_path = os.path.join(video_path, 'data', f'{prefix}.json')
 
-        color_im = cv2.cvtColor(cv2.imread(color_path), cv2.COLOR_BGR2RGB)
+        rgb_im = cv2.cvtColor(cv2.imread(color_path), cv2.COLOR_BGR2RGB)
         depth_im = cv2.imread(depth_path, cv2.IMREAD_UNCHANGED).astype(np.float32) / data_cfg['depth_scale']
         with open(info_path, 'r') as f:
             info = json.load(f)
+        info['node_confidence'] = dict()
 
         tic = time.time()
-        tracker.update(color_im, depth_im, info)
+        tracker.update(rgb_im, depth_im, info)
         total_time += time.time() - tic
 
         if args.visualize:

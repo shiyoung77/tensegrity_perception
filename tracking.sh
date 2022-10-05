@@ -3,8 +3,8 @@
 DATASET="dataset"
 
 # VIDEO_LIST=({0001..0016})
-VIDEO_LIST=($(ls $DATASET))
-# VIDEO_LIST=(10deg 10deg_{2..6})
+# VIDEO_LIST=($(ls $DATASET))
+VIDEO_LIST=("dusk_3")
 # VIDEO_LIST=($(ls $DATASET | grep -E "20deg"))
 
 METHOD="proposed"
@@ -21,7 +21,8 @@ for VIDEO in ${VIDEO_LIST[@]}; do
     fi
     echo $VIDEO
 
-    python tracking.py \
+    # python tracking.py \
+    PYOPENGL_PLATFORM="osmesa" python tracking.py \
         --dataset $DATASET \
         --video $VIDEO \
         --rod_mesh_file "pcd/yale/struct_with_socks_new.ply" \
@@ -34,18 +35,18 @@ for VIDEO in ${VIDEO_LIST[@]}; do
         --num_dummy_points 50 \
         --dummy_weights 0.5 \
         --render_scale 1 \
-        --max_correspondence_distances 0.15 0.15 0.1 0.07 0.05 0.04 0.03 \
-        --add_constrained_optimization \
+        --max_correspondence_distances 0.3 0.3 0.25 0.25 0.2 0.2 0.15 0.1 0.1 0.07 0.05 0.04 0.03 \
+        --optimize_every_n_iters 1 \
         --add_ground_constraints \
         --add_physical_constraints \
         --filter_observed_pts \
-        # --visualize \
-        # --save
+        --visualize \
+        --save
 
-    ffmpeg -r 30 -i "$DATASET/$VIDEO/estimation_vis-${METHOD}/%04d.jpg" \
-        -start_number $START_FRAME \
-        -vframes $(expr $END_FRAME - $START_FRAME) \
-        "$DATASET/$VIDEO/estimation.mp4"
+    # ffmpeg -r 30 -i "$DATASET/$VIDEO/estimation_vis-${METHOD}/%04d.jpg" \
+    #     -start_number $START_FRAME \
+    #     -vframes $(expr $END_FRAME - $START_FRAME) \
+    #     "$DATASET/$VIDEO/estimation.mp4"
 
     # ffmpeg -i $DATASET/$VIDEO/estimation.mp4 \
     #     -t 20 \
@@ -53,7 +54,8 @@ for VIDEO in ${VIDEO_LIST[@]}; do
     #     -loop 0 \
     #     $DATASET/$VIDEO/$VIDEO.gif
 
-    cp -r $DATASET/$VIDEO/poses-proposed $DATASET/$VIDEO/estimation.mp4  $DATASET/$VIDEO/config.json --parents /mnt/evo/dataset/new_results
+    # mkdir -p ~/dataset/dusk_results
+    # cp -r $DATASET/$VIDEO/poses-proposed $DATASET/$VIDEO/estimation.mp4 $DATASET/$VIDEO/config.json --parents ~/dataset/dusk_results
     # cp -r $DATASET/$VIDEO/poses-proposed $DATASET/$VIDEO/estimation.mp4 $DATASET/$VIDEO/$VIDEO.gif $DATASET/$VIDEO/config.json --parents /mnt/evo/dataset/new_results
 
     # break
