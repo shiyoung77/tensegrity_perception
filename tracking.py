@@ -84,7 +84,7 @@ class Tracker:
             self.G.edges[u, v]['length'] = self.data_cfg['rod_length']
             self.G.edges[u, v]['color'] = color
             self.G.edges[u, v]['pose_list'] = []
-    
+
 
     def initialize(self, rgb_im: np.ndarray, depth_im: np.ndarray, info: dict):
         self.rgb_im = rgb_im
@@ -124,7 +124,7 @@ class Tracker:
                     else:
                         print(f"2D pos: ({x}, {y}), 3D pos: ({X:.3f}, {Y:.3f}, {Z:.3f}), rgb: {rgb}, hsv: {hsv}")
                     return {'pos_2d': [x, y], 'pos_3d': [X, Y, Z], 'rgb': rgb, 'hsv': hsv}
-            
+
             def mouse_click_callback(event):
                 global endcap_id
                 endcap_color = self.G.nodes[endcap_id]['color']
@@ -154,15 +154,15 @@ class Tracker:
             fig.canvas.mpl_connect('motion_notify_event', get_point)
             fig.canvas.mpl_connect('button_press_event', mouse_click_callback)
             plt.show()
-            
-        # -------------------- optimize once -------------------- 
+
+        # -------------------- optimize once --------------------
         for _, (u, v) in self.data_cfg['color_to_rod'].items():
             self.G.nodes[u]['pos_list'].append(self.data_cfg['init_endcap_pos'][str(u)])
             self.G.nodes[v]['pos_list'].append(self.data_cfg['init_endcap_pos'][str(v)])
 
         add_physical_constraints = self.cfg.add_physical_constraints
         self.cfg.add_physical_constraints = False
-        self.constrained_optimization(info)
+        self.constrained_optimization(info, sanity_check=False)
         self.cfg.add_physical_constraints = add_physical_constraints
         # -------------------------------------------------------
 
@@ -230,8 +230,8 @@ class Tracker:
                 lowerb=tuple(self.data_cfg['hsv_ranges'][color][0]),
                 upperb=tuple(self.data_cfg['hsv_ranges'][color][1])
             ).astype(np.bool8)
-            if color == 'red':
-                hsv_mask |= cv2.inRange(color_im_hsv, lowerb=(0, 100, 100), upperb=(3, 255, 255)).astype(np.bool8)
+            # if color == 'red':
+            #     hsv_mask |= cv2.inRange(color_im_hsv, lowerb=(0, 100, 100), upperb=(3, 255, 255)).astype(np.bool8)
             obs_pts = self.compute_obs_pts(depth_im, hsv_mask)
             obs_pts_dict[color] = obs_pts
 
@@ -274,7 +274,7 @@ class Tracker:
                     u_obs_pts, v_obs_pts = self.filter_obs_pts(obs_pts, color, radius=max_distance, thresh=np.inf)
 
                 # add dummy points at the previous endcap position
-                if self.cfg.add_dummy_points:
+                if self.cfg.num_dummy_points > 0:
                     u_dummy = self.G.nodes[u]['pos_list'][-1]
                     v_dummy = self.G.nodes[v]['pos_list'][-1]
 
@@ -293,17 +293,21 @@ class Tracker:
                 self.G.nodes[u]['pos_list'][-1] = rod_pose[:3, 3] + rod_pose[:3, 2] * self.rod_length / 2
                 self.G.nodes[v]['pos_list'][-1] = rod_pose[:3, 3] - rod_pose[:3, 2] * self.rod_length / 2
 
-                self.G.nodes[u]['confidence'] = self.compute_confidence(u_obs_pts, u_rendered_pts, inlier_thresh=max_distance)
-                self.G.nodes[v]['confidence'] = self.compute_confidence(v_obs_pts, v_rendered_pts, inlier_thresh=max_distance)
+                if self.cfg.use_adaptive_weights:
+                    self.G.nodes[u]['confidence'] = self.compute_confidence(u_obs_pts, u_rendered_pts, inlier_thresh=max_distance)
+                    self.G.nodes[v]['confidence'] = self.compute_confidence(v_obs_pts, v_rendered_pts, inlier_thresh=max_distance)
+                else:
+                    self.G.nodes[u]['confidence'] = 1
+                    self.G.nodes[v]['confidence'] = 1
 
             # print(f"point registration takes {time.time() - tic}s")
 
             # ================================== correction step ==================================
             if self.cfg.optimize_every_n_iters != 0 and iter % self.cfg.optimize_every_n_iters == 0:
                 tic = time.time()
-                self.constrained_optimization(info)
+                self.constrained_optimization(info, sanity_check=True)
                 # print(f"optimization takes {time.time() - tic}s")
-            
+
             for color, (u, v) in self.data_cfg['color_to_rod'].items():
                 prev_pose = prev_poses[color]
                 curr_pose = self.G.edges[u, v]['pose_list'][-1]
@@ -360,8 +364,6 @@ class Tracker:
 
 
     def compute_confidence(self, obs_pts, rendered_pts, inlier_thresh=0.01, min_node_confidence=0.1):
-        # return 1  # if want to speed up by sacrificing a little bit of accuracy
-
         if len(obs_pts) == 0 or len(rendered_pts) == 0:
             return min_node_confidence
 
@@ -375,7 +377,7 @@ class Tracker:
         return max(confidence, min_node_confidence)
 
 
-    def constrained_optimization(self, info):
+    def constrained_optimization(self, info, sanity_check=True):
         rod_length = self.data_cfg['rod_length']
         num_endcaps = 2 * self.data_cfg['num_rods']  # a rod has two end caps
 
@@ -427,10 +429,10 @@ class Tracker:
             print("Joint optimization fail! Something must be wrong.")
 
         for i in range(num_endcaps):
-            # sanity check in case the constraint optimization fails
-            if la.norm(res.x[(3 * i):(3 * i + 3)] - self.G.nodes[i]['pos_list'][-1]) > 0.1:
+            if sanity_check and la.norm(res.x[(3 * i):(3 * i + 3)] - self.G.nodes[i]['pos_list'][-1]) > 0.1:
                 print("Endcap position sanity check failed.")
-            self.G.nodes[i]['pos_list'][-1] = res.x[(3 * i):(3 * i + 3)].copy()
+            else:
+                self.G.nodes[i]['pos_list'][-1] = res.x[(3 * i):(3 * i + 3)].copy()
 
         for u, v in self.data_cfg['color_to_rod'].values():
             if self.G.edges[u, v]['pose_list']:
@@ -786,10 +788,10 @@ if __name__ == '__main__':
     parser.add_argument("--end_frame", default=10000, type=int)
     parser.add_argument("--render_scale", default=2, type=int)
     parser.add_argument("--max_correspondence_distances", default=[0.3, 0.15, 0.1, 0.06, 0.03], type=float, nargs="+")
-    parser.add_argument("--add_dummy_points", action="store_true")
     parser.add_argument("--num_dummy_points", type=int, default=50)
     parser.add_argument("--dummy_weights", type=float, default=0.1)
     parser.add_argument("--optimize_every_n_iters", type=int, default=1)
+    parser.add_argument("--use_adaptive_weights", action="store_true")
     parser.add_argument("--filter_observed_pts", action="store_true")
     parser.add_argument("--add_physical_constraints", action="store_true")
     parser.add_argument("--add_ground_constraints", action="store_true")

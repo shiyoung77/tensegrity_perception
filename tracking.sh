@@ -4,7 +4,7 @@ DATASET="dataset"
 
 # VIDEO_LIST=({0001..0016})
 # VIDEO_LIST=($(ls $DATASET))
-VIDEO_LIST=("dusk_8")
+VIDEO_LIST=("456foot_cw_3")
 # VIDEO_LIST=($(ls $DATASET | grep -E "20deg"))
 
 METHOD="proposed"
@@ -21,8 +21,8 @@ for VIDEO in ${VIDEO_LIST[@]}; do
     fi
     echo $VIDEO
 
-    # python tracking.py \
-    PYOPENGL_PLATFORM="osmesa" python tracking.py \
+    # PYOPENGL_PLATFORM="osmesa" python tracking.py \
+    python tracking.py \
         --dataset $DATASET \
         --video $VIDEO \
         --rod_mesh_file "pcd/yale/struct_with_socks_new.ply" \
@@ -31,17 +31,17 @@ for VIDEO in ${VIDEO_LIST[@]}; do
         --method $METHOD \
         --start_frame $START_FRAME \
         --end_frame $END_FRAME \
-        --add_dummy_points \
         --num_dummy_points 50 \
         --dummy_weights 0.5 \
         --render_scale 1 \
-        --max_correspondence_distances 0.3 0.25 0.2 0.15 0.1 0.07 0.05 0.04 0.03 \
+        --max_correspondence_distances 0.3 0.25 0.2 0.15 0.1 0.07 0.05 \
+        --use_adaptive_weights \
         --optimize_every_n_iters 2 \
         --add_ground_constraints \
         --add_physical_constraints \
         --filter_observed_pts \
         --visualize \
-        # --save
+        --save
         # --max_correspondence_distances 0.3 0.3 0.25 0.25 0.2 0.2 0.15 0.1 0.1 0.07 0.05 0.04 0.03 \
 
     # ffmpeg -r 30 -i "$DATASET/$VIDEO/estimation_vis-${METHOD}/%04d.jpg" \
@@ -57,7 +57,6 @@ for VIDEO in ${VIDEO_LIST[@]}; do
 
     # mkdir -p ~/dataset/dusk_results
     # cp -r $DATASET/$VIDEO/poses-proposed $DATASET/$VIDEO/estimation.mp4 $DATASET/$VIDEO/config.json --parents ~/dataset/dusk_results
-    # cp -r $DATASET/$VIDEO/poses-proposed $DATASET/$VIDEO/estimation.mp4 $DATASET/$VIDEO/$VIDEO.gif $DATASET/$VIDEO/config.json --parents /mnt/evo/dataset/new_results
 
     # break
 done
