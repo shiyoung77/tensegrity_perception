@@ -140,9 +140,9 @@ class Tracker:
                     lowerb, upperb = self.data_cfg['hsv_ranges'][endcap_color]
                     hsv = point['hsv']
                     if np.any(hsv < np.asarray(lowerb)) or np.any(hsv > np.asarray(upperb)):
-                        info['node_confidence'][endcap_id] = 0
+                        self.G.nodes[endcap_id]['confidence'] = 0
                     else:
-                        info['node_confidence'][endcap_id] = 1
+                        self.G.nodes[endcap_id]['confidence'] = 1
 
                     endcap_id += 1
                     if endcap_id < len(self.G.nodes):
@@ -219,11 +219,9 @@ class Tracker:
         self.rgb_im = rgb_im
         self.depth_im = depth_im
 
-        # get observed 3D points for both end caps of each rod
+        # get observed 3D points for both endcaps of each rod
         obs_pts_dict = dict()
         model_pcd_dict = dict()
-        mesh_nodes = dict()
-
         self.obs_vis = np.zeros_like(self.obs_vis)
         for color, (u, v) in self.data_cfg['color_to_rod'].items():
             color_im_hsv = cv2.cvtColor(rgb_im, cv2.COLOR_RGB2HSV)
@@ -232,8 +230,8 @@ class Tracker:
                 lowerb=tuple(self.data_cfg['hsv_ranges'][color][0]),
                 upperb=tuple(self.data_cfg['hsv_ranges'][color][1])
             ).astype(np.bool8)
-            # if color == 'red':
-            #     hsv_mask |= cv2.inRange(color_im_hsv, lowerb=(0, 100, 25), upperb=(3, 255, 100)).astype(np.bool8)
+            if color == 'red':
+                hsv_mask |= cv2.inRange(color_im_hsv, lowerb=(0, 100, 100), upperb=(3, 255, 255)).astype(np.bool8)
             obs_pts = self.compute_obs_pts(depth_im, hsv_mask)
             obs_pts_dict[color] = obs_pts
 
@@ -249,27 +247,12 @@ class Tracker:
             self.G.nodes[u]['pos_list'].append(prev_pose[:3, 3] + prev_pose[:3, 2] * self.rod_length / 2)
             self.G.nodes[v]['pos_list'].append(prev_pose[:3, 3] - prev_pose[:3, 2] * self.rod_length / 2)
 
-            # prev_pose = self.G.edges[u, v]['pose_list'][-1].copy()
-            # mesh_nodes[self.create_scene_node(f"node-{u}", self.endcap_meshes[0], prev_pose)] = u + 1
-            # mesh_nodes[self.create_scene_node(f"node-{v}", self.endcap_meshes[1], prev_pose)] = v + 1
-
             if color == 'red':
                 self.obs_vis[hsv_mask, 0] = 255
             elif color == 'green':
                 self.obs_vis[hsv_mask, 1] = 255
             elif color == 'blue':
                 self.obs_vis[hsv_mask, 2] = 255
-
-        # rendered_seg, rendered_depth = self.render_nodes(mesh_nodes, depth_only=False)
-        # rendered_seg_gpu = torch.from_numpy(rendered_seg).cuda()
-        # rendered_depth_gpu = torch.from_numpy(rendered_depth).cuda().to(torch.float32)
-        # for color, (u, v) in self.data_cfg['color_to_rod'].items():
-        #     u_pcd = o3d.geometry.PointCloud()
-        #     u_pcd.points = o3d.utility.Vector3dVector(self.compute_obs_pts(rendered_depth_gpu, (rendered_seg_gpu == u + 1)))
-        #     v_pcd = o3d.geometry.PointCloud()
-        #     v_pcd.points = o3d.utility.Vector3dVector(self.compute_obs_pts(rendered_depth_gpu, (rendered_seg_gpu == v + 1)))
-        #     model_pcd_dict[u] = u_pcd
-        #     model_pcd_dict[v] = v_pcd
 
         for iter, max_distance in enumerate(self.cfg.max_correspondence_distances):
             prev_poses = {}
@@ -279,12 +262,11 @@ class Tracker:
             # ================================== prediction step ==================================
             tic = time.time()
             for color, (u, v) in self.data_cfg['color_to_rod'].items():
-                # u_rendered_pts = self.compute_obs_pts(rendered_depth_gpu, (rendered_seg_gpu == u + 1))
-                # v_rendered_pts = self.compute_obs_pts(rendered_depth_gpu, (rendered_seg_gpu == v + 1))
                 u_rendered_pts = np.asarray(model_pcd_dict[u].points)
                 v_rendered_pts = np.asarray(model_pcd_dict[v].points)
 
                 obs_pts = obs_pts_dict[color]
+
                 # filter observed points based on z coordinates
                 if self.cfg.filter_observed_pts:
                     u_obs_pts, v_obs_pts = self.filter_obs_pts(obs_pts, color, radius=max_distance, thresh=0.02)
@@ -311,8 +293,8 @@ class Tracker:
                 self.G.nodes[u]['pos_list'][-1] = rod_pose[:3, 3] + rod_pose[:3, 2] * self.rod_length / 2
                 self.G.nodes[v]['pos_list'][-1] = rod_pose[:3, 3] - rod_pose[:3, 2] * self.rod_length / 2
 
-                # self.G.nodes[u]['confidence'] = self.compute_confidence(u_obs_pts, u_rendered_pts, num_thresh=50, inlier_thresh=0.02)
-                # self.G.nodes[v]['confidence'] = self.compute_confidence(v_obs_pts, v_rendered_pts, num_thresh=50, inlier_thresh=0.02)
+                self.G.nodes[u]['confidence'] = self.compute_confidence(u_obs_pts, u_rendered_pts, inlier_thresh=max_distance)
+                self.G.nodes[v]['confidence'] = self.compute_confidence(v_obs_pts, v_rendered_pts, inlier_thresh=max_distance)
 
             # print(f"point registration takes {time.time() - tic}s")
 
@@ -377,22 +359,20 @@ class Tracker:
         return self.render_nodes(seg_node_map)
 
 
-    # def compute_confidence(self, obs_pts, rendered_pts, num_thresh=50, inlier_thresh=0.01):
-    #     N, M  = obs_pts.shape[0], rendered_pts.shape[0]
-    #     if N < num_thresh or M < num_thresh:
-    #         return 0
+    def compute_confidence(self, obs_pts, rendered_pts, inlier_thresh=0.01, min_node_confidence=0.1):
+        # return 1  # if want to speed up by sacrificing a little bit of accuracy
 
-    #     distances = torch.norm(rendered_pts.unsqueeze(1) - obs_pts.unsqueeze(0), dim=2)  # (N, M)
-    #     tp = 0
+        if len(obs_pts) == 0 or len(rendered_pts) == 0:
+            return min_node_confidence
 
-    #     closest_distance, _ = torch.min(distances, dim=1)
-    #     tp += torch.sum(closest_distance < inlier_thresh)
+        o_tree = KDTree(obs_pts)
+        r_tree = KDTree(rendered_pts)
+        r2o_dist, _ = o_tree.query(rendered_pts, k=1, distance_upper_bound=inlier_thresh)
+        o2r_dist, _ = r_tree.query(obs_pts, k=1, distance_upper_bound=inlier_thresh)
 
-    #     closest_distance, _ = torch.min(distances, dim=0)
-    #     tp += torch.sum(closest_distance < inlier_thresh)
-
-    #     f1 = tp / (N + M)
-    #     return f1.item()
+        numerator = np.sum(o2r_dist < inlier_thresh) + np.sum(r2o_dist < inlier_thresh)
+        confidence = numerator / (len(o2r_dist) + len(r2o_dist))  # f1 score
+        return max(confidence, min_node_confidence)
 
 
     def constrained_optimization(self, info):
@@ -488,16 +468,13 @@ class Tracker:
 
     def objective_function_generator(self, info):
         sensor_measurement = info['sensors']
-        node_confidence = info['node_confidence']
 
         def objective_function(X):
             unary_loss = 0
             for i in range(len(self.data_cfg['node_to_color'])):
                 pos_est = X[(3 * i):(3 * i + 3)]
                 pos_old = self.G.nodes[i]['pos_list'][-1]
-                confidence = node_confidence.get(i, 1)
-                # confidence = self.G.nodes[i].get('confidence', 1)
-                # confidence = 1
+                confidence = self.G.nodes[i].get('confidence', 1)
                 unary_loss += confidence * np.sum((pos_est - pos_old)**2)
 
             binary_loss = 0
@@ -507,12 +484,12 @@ class Tracker:
                     continue
 
                 factor = 0.2
-                # c_u = self.G.nodes[u].get('confidence', 1)
-                # c_v = self.G.nodes[v].get('confidence', 1)
-                # if c_u > 0.5 and c_v > 0.5:
-                #     factor = 0.05
-                # elif c_u > 0.2 and c_v > 0.2:
-                #     factor *= (1 - 0.5*(c_u + c_v))
+                c_u = self.G.nodes[u].get('confidence', 1)
+                c_v = self.G.nodes[v].get('confidence', 1)
+                if c_u > 0.5 and c_v > 0.5:
+                    factor = 0
+                elif c_u > 0.2 and c_v > 0.2:
+                    factor *= (1 - 0.5*(c_u + c_v))
 
                 u_pos = X[(3 * u):(3 * u + 3)]
                 v_pos = X[(3 * v):(3 * v + 3)]
@@ -533,9 +510,7 @@ class Tracker:
             for i in range(len(self.data_cfg['node_to_color'])):
                 pos_est = X[3 * i : 3 * i + 3]
                 pos_old = self.G.nodes[i]['pos_list'][-1]
-                confidence = node_confidence.get(i, 1)
-                # confidence = self.G.nodes[i].get('confidence', 1)
-                # confidence = 1
+                confidence = self.G.nodes[i].get('confidence', 1)
                 result[3 * i : 3 * i + 3] = 2 * confidence * (pos_est - pos_old)
 
             for sensor_id, (u, v) in self.data_cfg['sensor_to_tendon'].items():
@@ -543,13 +518,13 @@ class Tracker:
                 if not self.data_cfg['sensor_status'][sensor_id] or sensor_measurement[sensor_id]['length'] <= 0:
                     continue
 
+                factor = 0.2
                 c_u = self.G.nodes[u].get('confidence', 1)
                 c_v = self.G.nodes[v].get('confidence', 1)
-                factor = 0.2
-                # if c_u > 0.5 and c_v > 0.5:
-                #     factor = 0.05
-                # elif c_u > 0.2 and c_v > 0.2:
-                #     factor *= (1 - 0.5*(c_u + c_v))
+                if c_u > 0.5 and c_v > 0.5:
+                    factor = 0
+                elif c_u > 0.2 and c_v > 0.2:
+                    factor *= (1 - 0.5*(c_u + c_v))
 
                 u_pos = X[(3 * u):(3 * u + 3)]
                 v_pos = X[(3 * v):(3 * v + 3)]
@@ -861,7 +836,6 @@ if __name__ == '__main__':
     depth_im = cv2.imread(depth_path, cv2.IMREAD_UNCHANGED).astype(np.float32) / data_cfg['depth_scale']
     with open(info_path, 'r') as f:
         info = json.load(f)
-    info['node_confidence'] = dict()
 
     tracker.initialize(rgb_im, depth_im, info)
     data_cfg_module.write_config(tracker.data_cfg)
@@ -882,7 +856,6 @@ if __name__ == '__main__':
         depth_im = cv2.imread(depth_path, cv2.IMREAD_UNCHANGED).astype(np.float32) / data_cfg['depth_scale']
         with open(info_path, 'r') as f:
             info = json.load(f)
-        info['node_confidence'] = dict()
 
         tic = time.time()
         tracker.update(rgb_im, depth_im, info)

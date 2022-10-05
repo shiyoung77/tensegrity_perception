@@ -4,7 +4,7 @@ DATASET="dataset"
 
 # VIDEO_LIST=({0001..0016})
 # VIDEO_LIST=($(ls $DATASET))
-VIDEO_LIST=("dusk_3")
+VIDEO_LIST=("dusk_8")
 # VIDEO_LIST=($(ls $DATASET | grep -E "20deg"))
 
 METHOD="proposed"
@@ -35,13 +35,14 @@ for VIDEO in ${VIDEO_LIST[@]}; do
         --num_dummy_points 50 \
         --dummy_weights 0.5 \
         --render_scale 1 \
-        --max_correspondence_distances 0.3 0.3 0.25 0.25 0.2 0.2 0.15 0.1 0.1 0.07 0.05 0.04 0.03 \
-        --optimize_every_n_iters 1 \
+        --max_correspondence_distances 0.3 0.25 0.2 0.15 0.1 0.07 0.05 0.04 0.03 \
+        --optimize_every_n_iters 2 \
         --add_ground_constraints \
         --add_physical_constraints \
         --filter_observed_pts \
         --visualize \
-        --save
+        # --save
+        # --max_correspondence_distances 0.3 0.3 0.25 0.25 0.2 0.2 0.15 0.1 0.1 0.07 0.05 0.04 0.03 \
 
     # ffmpeg -r 30 -i "$DATASET/$VIDEO/estimation_vis-${METHOD}/%04d.jpg" \
     #     -start_number $START_FRAME \
