@@ -6,7 +6,7 @@ import cv2
 import matplotlib.pyplot as plt
 
 dataset = 'dataset/dusk_13'
-with open(os.path.join(dataset, 'cam_config.json'), 'r') as f:
+with open(os.path.join(dataset, 'config.json'), 'r') as f:
     cam_info = json.load(f)
 
 prefix = 0
@@ -23,9 +23,10 @@ depth_im = cv2.imread(depth_path, cv2.IMREAD_UNCHANGED).astype(np.float32) / cam
 #            event.x, event.y, event.xdata, event.ydata))
 
 def get_color(event):
-    x = int(round(event.xdata))
-    y = int(round(event.ydata))
-    print(f"{x = }, {y = }, rgb: {rgb_im[y, x]}, hsv: {hsv_im[y, x]}")
+    if event.xdata and event.ydata:
+        x = int(round(event.xdata))
+        y = int(round(event.ydata))
+        print(f"{x = }, {y = }, rgb: {rgb_im[y, x]}, hsv: {hsv_im[y, x]}")
 
 
 fig, ax = plt.subplots(1, 2, figsize=(15, 6))
