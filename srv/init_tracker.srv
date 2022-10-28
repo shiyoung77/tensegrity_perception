@@ -1,0 +1,5 @@
+sensor_msgs/Image rgb_im
+sensor_msgs/Image depth_im
+std_msgs/Float64MultiArray cable_lengths
+---
+bool initialized

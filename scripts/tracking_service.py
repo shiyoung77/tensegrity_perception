@@ -3,9 +3,9 @@ import time
 import copy
 import importlib
 import pprint
-import json
 from argparse import ArgumentParser
-from typing import List, Dict
+from collections import defaultdict
+from typing import Dict
 
 import numpy as np
 import numpy.linalg as la
@@ -16,7 +16,6 @@ from scipy.optimize import minimize
 from scipy.spatial import KDTree
 from scipy.spatial.transform import Rotation
 from matplotlib import pyplot as plt
-from tqdm import tqdm
 import trimesh
 from trimesh.sample import sample_surface_even
 import pyrender
@@ -24,9 +23,18 @@ from pyrender.constants import RenderFlags
 
 from perception_utils import create_pcd, plane_detection_ransac, vis_pcd
 
+import rospy
+import rosgraph
+from cv_bridge import CvBridge
+from std_msgs.msg import Float64MultiArray
+from sensor_msgs.msg import Image
+from tensegrity_perception.srv import init_tracker
+
+global endcap_id
+global endcap_color
+
 
 class Tracker:
-
     ColorDict = {
         "red": [255, 0, 0],
         "green": [0, 255, 0],
@@ -37,7 +45,6 @@ class Tracker:
         self.cfg = cfg
         self.data_cfg = data_cfg
         pprint.pprint(self.data_cfg)
-        self.initialized = False
 
         self.endcap_meshes = endcap_meshes
         self.rod_pcd = copy.deepcopy(rod_pcd)
@@ -85,11 +92,22 @@ class Tracker:
             self.G.edges[u, v]['color'] = color
             self.G.edges[u, v]['pose_list'] = []
 
+        self.init_tracker_srv = rospy.Service('initialize_tracker', init_tracker, self.initialize_tracker)
 
-    def initialize(self, rgb_im: np.ndarray, depth_im: np.ndarray, info: dict):
-        self.rgb_im = rgb_im
-        self.depth_im = depth_im
-        self.hsv_im = cv2.cvtColor(rgb_im, cv2.COLOR_RGB2HSV)
+        self.bridge = CvBridge()
+        self.current_state = None
+        self.rgb_im = None
+        self.depth_im = None
+        self.initialized = False
+
+    def initialize_tracker(self, req):
+        rgb_im = self.bridge.imgmsg_to_cv2(req.rgb_im, 'rgb8')
+        depth_im = self.bridge.imgmsg_to_cv2(req.depth_im, 'mono16')
+        hsv_im = cv2.cvtColor(self.rgb_im, cv2.COLOR_RGB2HSV)
+
+        info = defaultdict(dict)
+        for i, length in enumerate(np.asarray(req.cable_lengths)):
+            info['sensors'][i] = {'length': length}
 
         cam_intr = np.asarray(self.data_cfg['cam_intr'])
         fx, fy, cx, cy = cam_intr[0, 0], cam_intr[1, 1], cam_intr[0, 2], cam_intr[1, 2]
@@ -106,6 +124,7 @@ class Tracker:
             ax.imshow(rgb_im_copy)
 
             global endcap_id
+            global endcap_color
             endcap_id = 0
             endcap_color = self.G.nodes[endcap_id]['color']
             plt.get_current_fig_manager().set_window_title(f"Select #{endcap_id} endcap ({endcap_color})")
@@ -115,8 +134,8 @@ class Tracker:
                     x = int(round(event.xdata))
                     y = int(round(event.ydata))
                     rgb = list(rgb_im_copy[y, x])
-                    hsv = list(self.hsv_im[y, x])
-                    Z = float(self.depth_im[y, x])
+                    hsv = list(hsv_im[y, x])
+                    Z = float(depth_im[y, x])
                     X = float((x - cx) * Z / fx)
                     Y = float((y - cy) * Z / fy)
                     if Z == 0:
@@ -127,7 +146,8 @@ class Tracker:
 
             def mouse_click_callback(event):
                 global endcap_id
-                endcap_color = self.G.nodes[endcap_id]['color']
+                global endcap_color
+
                 point = get_point(event)
                 if point and point['pos_3d'][-1] != 0:
                     print("===========================================================================================")
@@ -176,7 +196,6 @@ class Tracker:
 
         self.initialized = True
 
-
     def compute_obs_pts(self, depth_im, mask):
         fx, fy = self.data_cfg['cam_intr'][0][0], self.data_cfg['cam_intr'][1][1]
         cx, cy = self.data_cfg['cam_intr'][0][2], self.data_cfg['cam_intr'][1][2]
@@ -188,17 +207,16 @@ class Tracker:
         pts[:, 1] = (ys - cy) / fy * pts[:, 2]
         return pts
 
-
     def filter_obs_pts(self, obs_pts, color, radius=0.1, thresh=0.01):
         u, v = self.data_cfg['color_to_rod'][color]
         u_pos = self.G.nodes[u]['pos_list'][-1]
-        u_dist_sqr = np.sum((obs_pts - u_pos)**2, axis=1)
+        u_dist_sqr = np.sum((obs_pts - u_pos) ** 2, axis=1)
         v_pos = self.G.nodes[v]['pos_list'][-1]
-        v_dist_sqr = np.sum((obs_pts - v_pos)**2, axis=1)
+        v_dist_sqr = np.sum((obs_pts - v_pos) ** 2, axis=1)
 
         u_mask = u_dist_sqr < v_dist_sqr
-        u_pts = obs_pts[u_mask & (u_dist_sqr < radius**2)]
-        v_pts = obs_pts[(~u_mask) & (v_dist_sqr < radius**2)]
+        u_pts = obs_pts[u_mask & (u_dist_sqr < radius ** 2)]
+        v_pts = obs_pts[(~u_mask) & (v_dist_sqr < radius ** 2)]
 
         # filter points based on depth
         if u_pts.shape[0] > 0:
@@ -212,7 +230,6 @@ class Tracker:
             v_pts = v_pts[zs < z_min + thresh]
 
         return u_pts, v_pts
-
 
     def update(self, rgb_im, depth_im, info):
         assert self.initialized, "[Error] You must first initialize the tracker!"
@@ -254,7 +271,7 @@ class Tracker:
             elif color == 'blue':
                 self.obs_vis[hsv_mask, 2] = 255
 
-        for iter, max_distance in enumerate(self.cfg.max_correspondence_distances):
+        for iteration, max_distance in enumerate(self.cfg.max_correspondence_distances):
             prev_poses = {}
             for color, (u, v) in self.data_cfg['color_to_rod'].items():
                 prev_poses[color] = np.copy(self.G.edges[u, v]['pose_list'][-1])
@@ -294,8 +311,10 @@ class Tracker:
                 self.G.nodes[v]['pos_list'][-1] = rod_pose[:3, 3] - rod_pose[:3, 2] * self.rod_length / 2
 
                 if self.cfg.use_adaptive_weights:
-                    self.G.nodes[u]['confidence'] = self.compute_confidence(u_obs_pts, u_rendered_pts, inlier_thresh=max_distance)
-                    self.G.nodes[v]['confidence'] = self.compute_confidence(v_obs_pts, v_rendered_pts, inlier_thresh=max_distance)
+                    self.G.nodes[u]['confidence'] = self.compute_confidence(u_obs_pts, u_rendered_pts,
+                                                                            inlier_thresh=max_distance)
+                    self.G.nodes[v]['confidence'] = self.compute_confidence(v_obs_pts, v_rendered_pts,
+                                                                            inlier_thresh=max_distance)
                 else:
                     self.G.nodes[u]['confidence'] = 1
                     self.G.nodes[v]['confidence'] = 1
@@ -303,7 +322,7 @@ class Tracker:
             # print(f"point registration takes {time.time() - tic}s")
 
             # ================================== correction step ==================================
-            if self.cfg.optimize_every_n_iters != 0 and iter % self.cfg.optimize_every_n_iters == 0:
+            if self.cfg.optimize_every_n_iters != 0 and iteration % self.cfg.optimize_every_n_iters == 0:
                 tic = time.time()
                 self.constrained_optimization(info, sanity_check=True)
                 # print(f"optimization takes {time.time() - tic}s")
@@ -316,8 +335,8 @@ class Tracker:
                 model_pcd_dict[v].transform(delta_T)
         return
 
-
-    def create_scene_node(self, name, mesh, pose):
+    @staticmethod
+    def create_scene_node(name, mesh, pose):
         m = np.array([
             [1, 0, 0, 0],
             [0, -1, 0, 0],
@@ -325,7 +344,6 @@ class Tracker:
             [0, 0, 0, 1]
         ])
         return pyrender.Node(name=name, mesh=mesh, matrix=m @ pose)
-
 
     def render_nodes(self, seg_node_map: Dict[pyrender.Node, int], depth_only: bool = False):
         for node in seg_node_map:
@@ -338,7 +356,7 @@ class Tracker:
                 self.render_scene.remove_node(node)
             if scale != 1:
                 H, W = rendered_depth.shape
-                rendered_depth = cv2.resize(rendered_depth, (W*scale, H*scale), interpolation=cv2.INTER_NEAREST)
+                rendered_depth = cv2.resize(rendered_depth, (W * scale, H * scale), interpolation=cv2.INTER_NEAREST)
             return rendered_depth
 
         rendered_seg, rendered_depth = self.renderer.render(self.render_scene, flags=RenderFlags.SEG,
@@ -348,10 +366,9 @@ class Tracker:
             self.render_scene.remove_node(node)
         if scale != 1:
             H, W = rendered_depth.shape
-            rendered_depth = cv2.resize(rendered_depth, (W*scale, H*scale), interpolation=cv2.INTER_NEAREST)
-            rendered_seg = cv2.resize(rendered_seg, (W*scale, H*scale), interpolation=cv2.INTER_NEAREST)
+            rendered_depth = cv2.resize(rendered_depth, (W * scale, H * scale), interpolation=cv2.INTER_NEAREST)
+            rendered_seg = cv2.resize(rendered_seg, (W * scale, H * scale), interpolation=cv2.INTER_NEAREST)
         return rendered_seg, rendered_depth
-
 
     def render_current_state(self):
         mapping = {'red': 1, 'green': 2, 'blue': 3}
@@ -362,8 +379,8 @@ class Tracker:
             seg_node_map[mesh_node] = mapping[color]
         return self.render_nodes(seg_node_map)
 
-
-    def compute_confidence(self, obs_pts, rendered_pts, inlier_thresh=0.01, min_node_confidence=0.1):
+    @staticmethod
+    def compute_confidence(obs_pts, rendered_pts, inlier_thresh=0.01, min_node_confidence=0.1):
         if len(obs_pts) == 0 or len(rendered_pts) == 0:
             return min_node_confidence
 
@@ -375,7 +392,6 @@ class Tracker:
         numerator = np.sum(o2r_dist < inlier_thresh) + np.sum(r2o_dist < inlier_thresh)
         confidence = numerator / (len(o2r_dist) + len(r2o_dist))  # f1 score
         return max(confidence, min_node_confidence)
-
 
     def constrained_optimization(self, info, sanity_check=True):
         rod_length = self.data_cfg['rod_length']
@@ -424,6 +440,7 @@ class Tracker:
                     constraint['fun'], constraint['jac'] = self.rod_constraint_generator(u, v, p, q, alpha1, alpha2)
                     constraints.append(constraint)
 
+        # noinspection PyTypeChecker
         res = minimize(obj_func, init_values, jac=jac_func, method='SLSQP', constraints=constraints)
         if not res.success:
             print("Joint optimization fail! Something must be wrong.")
@@ -448,7 +465,6 @@ class Tracker:
             else:
                 self.G.edges[u, v]['pose_list'].append(optimized_pose)
 
-
     def ground_constraint_generator(self, u):
         cam_to_world = la.inv(self.data_cfg['cam_extr'])
         R = cam_to_world[:3, :3]
@@ -462,11 +478,10 @@ class Tracker:
 
         def jacobian_function(X):
             result = np.zeros_like(X)
-            result[3 * u : 3 * u + 3] = R[2]
+            result[3 * u: 3 * u + 3] = R[2]
             return result
 
         return constraint_function, jacobian_function
-
 
     def objective_function_generator(self, info):
         sensor_measurement = info['sensors']
@@ -477,7 +492,7 @@ class Tracker:
                 pos_est = X[(3 * i):(3 * i + 3)]
                 pos_old = self.G.nodes[i]['pos_list'][-1]
                 confidence = self.G.nodes[i].get('confidence', 1)
-                unary_loss += confidence * np.sum((pos_est - pos_old)**2)
+                unary_loss += confidence * np.sum((pos_est - pos_old) ** 2)
 
             binary_loss = 0
             for sensor_id, (u, v) in self.data_cfg['sensor_to_tendon'].items():
@@ -491,7 +506,7 @@ class Tracker:
                 if c_u > 0.5 and c_v > 0.5:
                     factor = 0
                 elif c_u > 0.2 and c_v > 0.2:
-                    factor *= (1 - 0.5*(c_u + c_v))
+                    factor *= (1 - 0.5 * (c_u + c_v))
 
                 u_pos = X[(3 * u):(3 * u + 3)]
                 v_pos = X[(3 * v):(3 * v + 3)]
@@ -502,7 +517,7 @@ class Tracker:
                 if np.abs(estimated_length - measured_length) > 0.1:
                     factor = 0
 
-                binary_loss += factor * (estimated_length - measured_length)**2
+                binary_loss += factor * (estimated_length - measured_length) ** 2
 
             return unary_loss + binary_loss
 
@@ -510,10 +525,10 @@ class Tracker:
             result = np.zeros_like(X)
 
             for i in range(len(self.data_cfg['node_to_color'])):
-                pos_est = X[3 * i : 3 * i + 3]
+                pos_est = X[3 * i: 3 * i + 3]
                 pos_old = self.G.nodes[i]['pos_list'][-1]
                 confidence = self.G.nodes[i].get('confidence', 1)
-                result[3 * i : 3 * i + 3] = 2 * confidence * (pos_est - pos_old)
+                result[3 * i: 3 * i + 3] = 2 * confidence * (pos_est - pos_old)
 
             for sensor_id, (u, v) in self.data_cfg['sensor_to_tendon'].items():
                 sensor_id = str(sensor_id)
@@ -526,7 +541,7 @@ class Tracker:
                 if c_u > 0.5 and c_v > 0.5:
                     factor = 0
                 elif c_u > 0.2 and c_v > 0.2:
-                    factor *= (1 - 0.5*(c_u + c_v))
+                    factor *= (1 - 0.5 * (c_u + c_v))
 
                 u_pos = X[(3 * u):(3 * u + 3)]
                 v_pos = X[(3 * v):(3 * v + 3)]
@@ -537,15 +552,15 @@ class Tracker:
                 if np.abs(l_est - l_gt) > 0.1:
                     factor = 0
 
-                result[3 * u : 3 * u + 3] += 2 * factor * (l_est - l_gt) * (u_pos - v_pos) / (l_est + 1e-12)
-                result[3 * v : 3 * v + 3] += 2 * factor * (l_est - l_gt) * (v_pos - u_pos) / (l_est + 1e-12)
+                result[3 * u: 3 * u + 3] += 2 * factor * (l_est - l_gt) * (u_pos - v_pos) / (l_est + 1e-12)
+                result[3 * v: 3 * v + 3] += 2 * factor * (l_est - l_gt) * (v_pos - u_pos) / (l_est + 1e-12)
 
             return result
 
         return objective_function, jacobian_function
 
-
-    def endcap_constraint_generator(self, u, v, rod_length):
+    @staticmethod
+    def endcap_constraint_generator(u, v, rod_length):
 
         def constraint_function(X):
             u_pos = X[3 * u: 3 * u + 3]
@@ -553,16 +568,15 @@ class Tracker:
             return la.norm(u_pos - v_pos) - rod_length
 
         def jacobian_function(X):
-            u_pos = X[3 * u : 3 * u + 3]
-            v_pos = X[3 * v : 3 * v + 3]
+            u_pos = X[3 * u: 3 * u + 3]
+            v_pos = X[3 * v: 3 * v + 3]
             C = la.norm(u_pos - v_pos) + 1e-12
             result = np.zeros_like(X)
-            result[3 * u : 3 * u + 3] = (u_pos - v_pos) / C
-            result[3 * v : 3 * v + 3] = (v_pos - u_pos) / C
+            result[3 * u: 3 * u + 3] = (u_pos - v_pos) / C
+            result[3 * v: 3 * v + 3] = (v_pos - u_pos) / C
             return result
 
         return constraint_function, jacobian_function
-
 
     def rod_constraint_generator(self, u, v, p, q, alpha1, alpha2):
         try:
@@ -570,7 +584,7 @@ class Tracker:
             p2 = self.G.nodes[v]['pos_list'][-2]
             p3 = self.G.nodes[p]['pos_list'][-2]
             p4 = self.G.nodes[q]['pos_list'][-2]
-        except:
+        except IndexError:
             p1 = self.G.nodes[u]['pos_list'][-1]
             p2 = self.G.nodes[v]['pos_list'][-1]
             p3 = self.G.nodes[p]['pos_list'][-1]
@@ -581,10 +595,10 @@ class Tracker:
         v1 /= (la.norm(v1) + 1e-12)
 
         def constraint_function(X):
-            q1 = X[3 * u : 3 * u + 3]
-            q2 = X[3 * v : 3 * v + 3]
-            q3 = X[3 * p : 3 * p + 3]
-            q4 = X[3 * q : 3 * q + 3]
+            q1 = X[3 * u: 3 * u + 3]
+            q2 = X[3 * v: 3 * v + 3]
+            q3 = X[3 * p: 3 * p + 3]
+            q4 = X[3 * q: 3 * q + 3]
             q5 = alpha1 * q1 + (1 - alpha1) * q2  # closest point on (u, v)
             q6 = alpha2 * q3 + (1 - alpha2) * q4  # closest point on (p, q)
             v2 = q5 - q6
@@ -592,14 +606,13 @@ class Tracker:
 
         def jacobian_function(X):
             result = np.zeros_like(X)
-            result[3 * u : 3 * u + 3] = alpha1 * v1
-            result[3 * v : 3 * v + 3] = (1 - alpha1) * v1
-            result[3 * p : 3 * p + 3] = -alpha2 * v1
-            result[3 * q : 3 * q + 3] = -(1 - alpha2) * v1
+            result[3 * u: 3 * u + 3] = alpha1 * v1
+            result[3 * v: 3 * v + 3] = (1 - alpha1) * v1
+            result[3 * p: 3 * p + 3] = -alpha2 * v1
+            result[3 * q: 3 * q + 3] = -(1 - alpha2) * v1
             return result
 
         return constraint_function, jacobian_function
-
 
     @staticmethod
     def estimate_rod_pose_from_endcap_centers(curr_endcap_centers, prev_rod_pose=None):
@@ -626,8 +639,8 @@ class Tracker:
         curr_rod_pose[:3, 3] = curr_rod_pos
         return curr_rod_pose
 
-
-    def register(self, obs_pts, rendered_pts, obs_w=None, rendered_w=None, max_distance=0.02):
+    @staticmethod
+    def register(obs_pts, rendered_pts, obs_w=None, rendered_w=None, max_distance=0.02):
         if obs_w is None:
             obs_w = np.ones(obs_pts.shape[0])
         if rendered_w is None:
@@ -639,14 +652,14 @@ class Tracker:
         mask = (closest_distance != np.inf)
         Q1 = obs_pts[mask]
         P1 = rendered_pts[closest_indices[mask]]
-        W1 = (1 - (closest_distance[mask] / max_distance)**2)**2 * obs_w[mask] * rendered_w[closest_indices[mask]]
+        W1 = (1 - (closest_distance[mask] / max_distance) ** 2) ** 2 * obs_w[mask] * rendered_w[closest_indices[mask]]
 
         o_tree = KDTree(obs_pts)
         closest_distance, closest_indices = o_tree.query(rendered_pts, k=1, distance_upper_bound=max_distance)
         mask = (closest_distance != np.inf)
         Q2 = obs_pts[closest_indices[mask]]
         P2 = rendered_pts[mask]
-        W2 = (1 - (closest_distance[mask] / max_distance)**2)**2 * obs_w[closest_indices[mask]] * rendered_w[mask]
+        W2 = (1 - (closest_distance[mask] / max_distance) ** 2) ** 2 * obs_w[closest_indices[mask]] * rendered_w[mask]
 
         Q = np.vstack([Q1, Q2])
         P = np.vstack([P1, P2])
@@ -670,11 +683,10 @@ class Tracker:
         T[:3, 3] = t
         return T
 
-
     # https://math.stackexchange.com/questions/1993953/closest-points-between-two-lines
     @staticmethod
     def compute_closest_pair_of_points(p1: np.ndarray, p2: np.ndarray, p3: np.ndarray, p4: np.ndarray):
-        """compute closest point pairs on two rods (p1, p2) and (p3, p4)
+        """compute the closest point pairs on two rods (p1, p2) and (p3, p4)
 
         Args:
             p1 (np.ndarray): start point of rod 1
@@ -698,7 +710,6 @@ class Tracker:
         alpha2 = 1 - t2 / l2
         return alpha1, alpha2
 
-
     def visualize_closest_pair_of_points(self):
 
         def create_geometries_for_vis(p1, p2, color, radius=0.01):
@@ -712,7 +723,8 @@ class Tracker:
 
             points = [p1.tolist(), p2.tolist()]
             lines = [[0, 1]]
-            line_set = o3d.geometry.LineSet(points=o3d.utility.Vector3dVector(points), lines=o3d.utility.Vector2iVector(lines))
+            line_set = o3d.geometry.LineSet(points=o3d.utility.Vector3dVector(points),
+                                            lines=o3d.utility.Vector2iVector(lines))
             return [sphere1, sphere2, line_set]
 
         geometries = []
@@ -739,44 +751,42 @@ class Tracker:
 
         o3d.visualization.draw_geometries(geometries)
 
-
     def get_2d_vis(self):
-        rendered_seg, rendered_depth = tracker.render_current_state()
+        rendered_seg, rendered_depth = self.render_current_state()
         H, W = self.data_cfg['im_h'], self.data_cfg['im_w']
         vis_im1 = np.copy(self.rgb_im)
         vis_im2 = np.zeros_like(self.rgb_im)
         for i, color in enumerate(['red', 'green', 'blue']):
             mask = rendered_depth.copy()
             mask[rendered_seg != i + 1] = 0
-            vis_im1[depth_im < mask] = Tracker.ColorDict[color]
+            vis_im1[self.depth_im < mask] = Tracker.ColorDict[color]
             vis_im2[mask > 0] = Tracker.ColorDict[color]
-        vis_im = np.empty((H*2, W*2, 3), dtype=np.uint8)
+        vis_im = np.empty((H * 2, W * 2, 3), dtype=np.uint8)
         vis_im[:H, :W] = self.rgb_im
-        vis_im[H:, :W] = tracker.obs_vis
+        vis_im[H:, :W] = self.obs_vis
         vis_im[:H, W:] = vis_im1
         vis_im[H:, W:] = vis_im2
         return vis_im
 
-
     def get_3d_vis(self):
         robot_pcd = o3d.geometry.PointCloud()
-        for color, (u, v) in data_cfg['color_to_rod'].items():
-            rod_pcd = copy.deepcopy(tracker.rod_pcd)
+        for color, (u, v) in self.data_cfg['color_to_rod'].items():
+            rod_pcd = copy.deepcopy(self.rod_pcd)
             rod_pcd = rod_pcd.paint_uniform_color(np.array(Tracker.ColorDict[color]) / 255)
-            rod_pose = np.copy(tracker.G.edges[u, v]['pose_list'][-1])
+            rod_pose = np.copy(self.G.edges[u, v]['pose_list'][-1])
             rod_pcd.transform(rod_pose)
             robot_pcd += rod_pcd
 
-        scene_pcd = create_pcd(self.depth_im, data_cfg['cam_intr'], self.rgb_im, depth_trunc=data_cfg['depth_trunc'])
+        scene_pcd = create_pcd(self.depth_im, self.data_cfg['cam_intr'], self.rgb_im, self.data_cfg['depth_trunc'])
         robot_pts = np.asarray(robot_pcd.points)
         bbox = o3d.geometry.AxisAlignedBoundingBox()
-        bbox.min_bound = robot_pts.min(axis=0) - 0.05
-        bbox.max_bound = robot_pts.max(axis=0) + 0.05
+        bbox.min_bound = np.min(robot_pts, axis=0) - 0.05
+        bbox.max_bound = np.max(robot_pts, axis=0) + 0.05
         scene_pcd = scene_pcd.crop(bbox)
         return robot_pcd + scene_pcd
 
 
-if __name__ == '__main__':
+def parse_argument():
     parser = ArgumentParser()
     parser.add_argument("--dataset", default="dataset")
     parser.add_argument("--video", default="monday_roll15")
@@ -797,6 +807,16 @@ if __name__ == '__main__':
     parser.add_argument("--add_ground_constraints", action="store_true")
     parser.add_argument("--save", action="store_true", help="save observation and qualitative results")
     parser.add_argument("-v", "--visualize", action="store_true")
+    return parser
+
+
+def main():
+    if not rosgraph.is_master_online():
+        print("roscore is not running! Run roscore first!")
+        exit(0)
+
+    rospy.init_node("tracking_service")
+    parser = parse_argument()
     args = parser.parse_args()
 
     video_path = os.path.join(args.dataset, args.video)
@@ -811,7 +831,7 @@ if __name__ == '__main__':
     rod_mesh_o3d = o3d.io.read_triangle_mesh(args.rod_mesh_file)
     rod_pcd = rod_mesh_o3d.sample_points_poisson_disk(1000)
 
-    # read rod and end cap trimesh for for rendering
+    # read rod and end cap trimesh for rendering
     rod_mesh = pyrender.Mesh.from_trimesh(trimesh.load_mesh(args.rod_mesh_file))
     # top_endcap_mesh = pyrender.Mesh.from_trimesh(trimesh.load_mesh(args.top_endcap_mesh_file))
     # bottom_endcap_mesh = pyrender.Mesh.from_trimesh(trimesh.load_mesh(args.bottom_endcap_mesh_file))
@@ -828,59 +848,8 @@ if __name__ == '__main__':
 
     # initialize tracker
     tracker = Tracker(args, data_cfg, rod_pcd, rod_mesh, [top_endcap_pcd, bottom_endcap_pcd])
-    # tracker = Tracker(args, data_cfg, rod_pcd, rod_mesh, [top_endcap_mesh, bottom_endcap_mesh])
+    rospy.spin()
 
-    # initialize tracker with the first frame
-    color_path = os.path.join(video_path, 'color', f'{prefixes[args.start_frame]}.png')
-    depth_path = os.path.join(video_path, 'depth', f'{prefixes[args.start_frame]}.png')
-    info_path = os.path.join(video_path, 'data', f'{prefixes[args.start_frame]}.json')
-    rgb_im = cv2.cvtColor(cv2.imread(color_path), cv2.COLOR_BGR2RGB)
-    depth_im = cv2.imread(depth_path, cv2.IMREAD_UNCHANGED).astype(np.float32) / data_cfg['depth_scale']
-    with open(info_path, 'r') as f:
-        info = json.load(f)
 
-    tracker.initialize(rgb_im, depth_im, info)
-    data_cfg_module.write_config(tracker.data_cfg)
-
-    if args.save:
-        os.makedirs(os.path.join(video_path, f'estimation_vis-{args.method}'), exist_ok=True)
-        os.makedirs(os.path.join(video_path, f"estimation_cloud-{args.method}"), exist_ok=True)
-
-    end_frame = min(len(prefixes), args.end_frame)
-    total_time = 0
-    for idx in tqdm(range(args.start_frame, end_frame)):
-        prefix = prefixes[idx]
-        color_path = os.path.join(video_path, 'color', f'{prefix}.png')
-        depth_path = os.path.join(video_path, 'depth', f'{prefix}.png')
-        info_path = os.path.join(video_path, 'data', f'{prefix}.json')
-
-        rgb_im = cv2.cvtColor(cv2.imread(color_path), cv2.COLOR_BGR2RGB)
-        depth_im = cv2.imread(depth_path, cv2.IMREAD_UNCHANGED).astype(np.float32) / data_cfg['depth_scale']
-        with open(info_path, 'r') as f:
-            info = json.load(f)
-
-        tic = time.time()
-        tracker.update(rgb_im, depth_im, info)
-        total_time += time.time() - tic
-
-        if args.visualize:
-            vis_im = tracker.get_2d_vis()
-            vis_im_bgr = cv2.cvtColor(vis_im, cv2.COLOR_RGB2BGR)
-            cv2.imshow("estimation", vis_im_bgr)
-            key = cv2.waitKey(1)
-            if key == ord('q'):
-                exit(0)
-
-            if args.save:
-                cv2.imwrite(os.path.join(video_path, f'estimation_vis-{args.method}', f'{prefix}.jpg'), vis_im_bgr)
-                o3d.io.write_point_cloud(os.path.join(video_path, f"estimation_cloud-{args.method}", f"{idx:04d}.pcd"), tracker.get_3d_vis())
-    print(f"FPS: {(end_frame - args.start_frame + 1e-12) / total_time}")
-
-    # save rod poses and end cap positions to file
-    if args.save:
-        pose_output_folder = os.path.join(video_path, f"poses-{args.method}")
-        os.makedirs(pose_output_folder, exist_ok=True)
-        for color, (u, v) in tracker.data_cfg['color_to_rod'].items():
-            np.save(os.path.join(pose_output_folder, f'{color}.npy'), np.array(tracker.G.edges[u, v]['pose_list'])[1:])
-            np.save(os.path.join(pose_output_folder, f'{u}_pos.npy'), np.array(tracker.G.nodes[u]['pos_list'])[1:])
-            np.save(os.path.join(pose_output_folder, f'{v}_pos.npy'), np.array(tracker.G.nodes[v]['pos_list'])[1:])
+if __name__ == '__main__':
+    main()
