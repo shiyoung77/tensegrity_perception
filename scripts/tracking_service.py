@@ -1,9 +1,10 @@
+#!/home/lsy/anaconda3/envs/tensegrity/bin/python
+
 import os
 import time
+import json
 import copy
-import importlib
 import pprint
-from argparse import ArgumentParser
 from collections import defaultdict
 from typing import Dict
 
@@ -20,11 +21,11 @@ import trimesh
 from trimesh.sample import sample_surface_even
 import pyrender
 from pyrender.constants import RenderFlags
+from easydict import EasyDict
 
 from perception_utils import create_pcd, plane_detection_ransac, vis_pcd
 
 import rospy
-import rosgraph
 from cv_bridge import CvBridge
 from std_msgs.msg import Float64MultiArray
 from sensor_msgs.msg import Image
@@ -334,50 +335,6 @@ class Tracker:
                 model_pcd_dict[u].transform(delta_T)
                 model_pcd_dict[v].transform(delta_T)
         return
-
-    @staticmethod
-    def create_scene_node(name, mesh, pose):
-        m = np.array([
-            [1, 0, 0, 0],
-            [0, -1, 0, 0],
-            [0, 0, -1, 0],
-            [0, 0, 0, 1]
-        ])
-        return pyrender.Node(name=name, mesh=mesh, matrix=m @ pose)
-
-    def render_nodes(self, seg_node_map: Dict[pyrender.Node, int], depth_only: bool = False):
-        for node in seg_node_map:
-            self.render_scene.add_node(node)
-
-        scale = self.cfg.render_scale
-        if depth_only:
-            rendered_depth = self.renderer.render(self.render_scene, flags=RenderFlags.DEPTH_ONLY)
-            for node in seg_node_map:
-                self.render_scene.remove_node(node)
-            if scale != 1:
-                H, W = rendered_depth.shape
-                rendered_depth = cv2.resize(rendered_depth, (W * scale, H * scale), interpolation=cv2.INTER_NEAREST)
-            return rendered_depth
-
-        rendered_seg, rendered_depth = self.renderer.render(self.render_scene, flags=RenderFlags.SEG,
-                                                            seg_node_map=seg_node_map)
-        rendered_seg = np.copy(rendered_seg[:, :, 0])
-        for node in seg_node_map:
-            self.render_scene.remove_node(node)
-        if scale != 1:
-            H, W = rendered_depth.shape
-            rendered_depth = cv2.resize(rendered_depth, (W * scale, H * scale), interpolation=cv2.INTER_NEAREST)
-            rendered_seg = cv2.resize(rendered_seg, (W * scale, H * scale), interpolation=cv2.INTER_NEAREST)
-        return rendered_seg, rendered_depth
-
-    def render_current_state(self):
-        mapping = {'red': 1, 'green': 2, 'blue': 3}
-        seg_node_map = dict()
-        for color, (u, v) in self.data_cfg['color_to_rod'].items():
-            pose = self.G.edges[u, v]['pose_list'][-1]
-            mesh_node = self.create_scene_node(f"{color}-mash", self.rod_mesh, pose=pose)
-            seg_node_map[mesh_node] = mapping[color]
-        return self.render_nodes(seg_node_map)
 
     @staticmethod
     def compute_confidence(obs_pts, rendered_pts, inlier_thresh=0.01, min_node_confidence=0.1):
@@ -710,46 +667,49 @@ class Tracker:
         alpha2 = 1 - t2 / l2
         return alpha1, alpha2
 
-    def visualize_closest_pair_of_points(self):
+    @staticmethod
+    def create_scene_node(name, mesh, pose):
+        m = np.array([
+            [1, 0, 0, 0],
+            [0, -1, 0, 0],
+            [0, 0, -1, 0],
+            [0, 0, 0, 1]
+        ])
+        return pyrender.Node(name=name, mesh=mesh, matrix=m @ pose)
 
-        def create_geometries_for_vis(p1, p2, color, radius=0.01):
-            sphere1 = o3d.geometry.TriangleMesh.create_sphere(radius=radius)
-            sphere1.paint_uniform_color(color)
-            sphere1.translate(p1)
+    def render_nodes(self, seg_node_map: Dict[pyrender.Node, int], depth_only: bool = False):
+        for node in seg_node_map:
+            self.render_scene.add_node(node)
 
-            sphere2 = o3d.geometry.TriangleMesh.create_sphere(radius=radius)
-            sphere2.paint_uniform_color(color)
-            sphere2.translate(p2)
+        scale = self.cfg.render_scale
+        if depth_only:
+            rendered_depth = self.renderer.render(self.render_scene, flags=RenderFlags.DEPTH_ONLY)
+            for node in seg_node_map:
+                self.render_scene.remove_node(node)
+            if scale != 1:
+                H, W = rendered_depth.shape
+                rendered_depth = cv2.resize(rendered_depth, (W * scale, H * scale), interpolation=cv2.INTER_NEAREST)
+            return rendered_depth
 
-            points = [p1.tolist(), p2.tolist()]
-            lines = [[0, 1]]
-            line_set = o3d.geometry.LineSet(points=o3d.utility.Vector3dVector(points),
-                                            lines=o3d.utility.Vector2iVector(lines))
-            return [sphere1, sphere2, line_set]
+        rendered_seg, rendered_depth = self.renderer.render(self.render_scene, flags=RenderFlags.SEG,
+                                                            seg_node_map=seg_node_map)
+        rendered_seg = np.copy(rendered_seg[:, :, 0])
+        for node in seg_node_map:
+            self.render_scene.remove_node(node)
+        if scale != 1:
+            H, W = rendered_depth.shape
+            rendered_depth = cv2.resize(rendered_depth, (W * scale, H * scale), interpolation=cv2.INTER_NEAREST)
+            rendered_seg = cv2.resize(rendered_seg, (W * scale, H * scale), interpolation=cv2.INTER_NEAREST)
+        return rendered_seg, rendered_depth
 
-        geometries = []
+    def render_current_state(self):
+        mapping = {'red': 1, 'green': 2, 'blue': 3}
+        seg_node_map = dict()
         for color, (u, v) in self.data_cfg['color_to_rod'].items():
-            p1 = self.G.nodes[u]['pos_list'][-1]
-            p2 = self.G.nodes[v]['pos_list'][-1]
-            geometries.extend(create_geometries_for_vis(p1, p2, np.array(self.ColorDict[color]) / 255))
-
-        rods = list(self.data_cfg['color_to_rod'].values())
-        for i in range(len(rods)):
-            u, v = rods[i]
-            p1 = self.G.nodes[u]['pos_list'][-1]
-            p2 = self.G.nodes[v]['pos_list'][-1]
-
-            for j in range(i + 1, len(rods)):
-                p, q = rods[j]
-                p3 = self.G.nodes[p]['pos_list'][-1]
-                p4 = self.G.nodes[q]['pos_list'][-1]
-
-                alpha1, alpha2 = self.compute_closest_pair_of_points(p1, p2, p3, p4)
-                p5 = alpha1 * p1 + (1 - alpha1) * p2
-                p6 = alpha2 * p3 + (1 - alpha2) * p4
-                geometries.extend(create_geometries_for_vis(p5, p6, [1, 1, 0], radius=0.005))
-
-        o3d.visualization.draw_geometries(geometries)
+            pose = self.G.edges[u, v]['pose_list'][-1]
+            mesh_node = self.create_scene_node(f"{color}-mash", self.rod_mesh, pose=pose)
+            seg_node_map[mesh_node] = mapping[color]
+        return self.render_nodes(seg_node_map)
 
     def get_2d_vis(self):
         rendered_seg, rendered_depth = self.render_current_state()
@@ -785,70 +745,50 @@ class Tracker:
         scene_pcd = scene_pcd.crop(bbox)
         return robot_pcd + scene_pcd
 
-
-def parse_argument():
-    parser = ArgumentParser()
-    parser.add_argument("--dataset", default="dataset")
-    parser.add_argument("--video", default="monday_roll15")
-    parser.add_argument("--method", default="proposed")
-    parser.add_argument("--rod_mesh_file", default="pcd/yale/struct_with_socks_new.ply")
-    parser.add_argument("--top_endcap_mesh_file", default="pcd/yale/end_cap_top_new.obj")
-    parser.add_argument("--bottom_endcap_mesh_file", default="pcd/yale/end_cap_bottom_new.obj")
-    parser.add_argument("--start_frame", default=0, type=int)
-    parser.add_argument("--end_frame", default=10000, type=int)
-    parser.add_argument("--render_scale", default=2, type=int)
-    parser.add_argument("--max_correspondence_distances", default=[0.3, 0.15, 0.1, 0.06, 0.03], type=float, nargs="+")
-    parser.add_argument("--num_dummy_points", type=int, default=50)
-    parser.add_argument("--dummy_weights", type=float, default=0.1)
-    parser.add_argument("--optimize_every_n_iters", type=int, default=1)
-    parser.add_argument("--use_adaptive_weights", action="store_true")
-    parser.add_argument("--filter_observed_pts", action="store_true")
-    parser.add_argument("--add_physical_constraints", action="store_true")
-    parser.add_argument("--add_ground_constraints", action="store_true")
-    parser.add_argument("--save", action="store_true", help="save observation and qualitative results")
-    parser.add_argument("-v", "--visualize", action="store_true")
-    return parser
+    @staticmethod
+    def run():
+        rospy.loginfo("Tracking service started but not initialized yet.")
+        rospy.loginfo("Waiting for requests to initialize.")
+        rospy.spin()
 
 
 def main():
-    if not rosgraph.is_master_online():
-        print("roscore is not running! Run roscore first!")
-        exit(0)
-
     rospy.init_node("tracking_service")
-    parser = parse_argument()
-    args = parser.parse_args()
 
-    video_path = os.path.join(args.dataset, args.video)
-    prefixes = sorted([i.split('.')[0] for i in os.listdir(os.path.join(video_path, 'color'))])
+    model_params = [params for params in rospy.get_param_names() if params.startswith("/tracking_service")]
+    model_cfg = EasyDict({param.split('/')[-1]: rospy.get_param(param) for param in model_params})
 
     # read data config
-    data_cfg_module = importlib.import_module(f'{args.dataset}.{args.video}.config')
-    data_cfg = data_cfg_module.get_config(read_cfg=True)
+    with open(rospy.get_param("data_cfg_file"), 'r') as fp:
+        data_cfg = json.load(fp)
+
+    rod_mesh_file = rospy.get_param("rod_mesh_file")
+    top_endcap_mesh_file = rospy.get_param("top_endcap_mesh_file")
+    bottom_endcap_mesh_file = rospy.get_param("bottom_endcap_mesh_file")
+
+    assert os.path.exists(rod_mesh_file), f"{rod_mesh_file} doesn't exist!"
+    assert os.path.exists(top_endcap_mesh_file), f"{top_endcap_mesh_file} doesn't exist!"
+    assert os.path.exists(bottom_endcap_mesh_file), f"{bottom_endcap_mesh_file} doesn't exist!"
 
     # read rod point cloud
-    assert os.path.isfile(args.rod_mesh_file), "rod geometry is not found!"
-    rod_mesh_o3d = o3d.io.read_triangle_mesh(args.rod_mesh_file)
+    rod_mesh_o3d = o3d.io.read_triangle_mesh(rod_mesh_file)
     rod_pcd = rod_mesh_o3d.sample_points_poisson_disk(1000)
 
     # read rod and end cap trimesh for rendering
-    rod_mesh = pyrender.Mesh.from_trimesh(trimesh.load_mesh(args.rod_mesh_file))
-    # top_endcap_mesh = pyrender.Mesh.from_trimesh(trimesh.load_mesh(args.top_endcap_mesh_file))
-    # bottom_endcap_mesh = pyrender.Mesh.from_trimesh(trimesh.load_mesh(args.bottom_endcap_mesh_file))
-
-    top_endcap_mesh = trimesh.load_mesh(args.top_endcap_mesh_file)
+    rod_mesh = pyrender.Mesh.from_trimesh(trimesh.load_mesh(rod_mesh_file))
+    top_endcap_mesh = trimesh.load_mesh(top_endcap_mesh_file)
     top_endcap_pts, _ = sample_surface_even(top_endcap_mesh, 300)
     top_endcap_pcd = o3d.geometry.PointCloud()
     top_endcap_pcd.points = o3d.utility.Vector3dVector(top_endcap_pts)
-    bottom_endcap_mesh = trimesh.load_mesh(args.bottom_endcap_mesh_file)
+    bottom_endcap_mesh = trimesh.load_mesh(bottom_endcap_mesh_file)
     bottom_endcap_pts, _ = sample_surface_even(bottom_endcap_mesh, 300)
     bottom_endcap_pcd = o3d.geometry.PointCloud()
     bottom_endcap_pcd.points = o3d.utility.Vector3dVector(bottom_endcap_pts)
     # o3d.visualization.draw_geometries([top_endcap_pcd, bottom_endcap_pcd])
 
     # initialize tracker
-    tracker = Tracker(args, data_cfg, rod_pcd, rod_mesh, [top_endcap_pcd, bottom_endcap_pcd])
-    rospy.spin()
+    tracker = Tracker(model_cfg, data_cfg, rod_pcd, rod_mesh, [top_endcap_pcd, bottom_endcap_pcd])
+    tracker.run()
 
 
 if __name__ == '__main__':

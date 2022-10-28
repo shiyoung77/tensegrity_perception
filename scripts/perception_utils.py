@@ -6,16 +6,24 @@ import scipy.linalg as la
 
 
 def timeit(f, n=1, need_compile=False):
+    assert isinstance(n, int) and n >= 1
+
     def wrapper(*args, **kwargs):
-        if need_compile:  # ignore the first run if needs compile
+        if need_compile:  # ignore the first run if it needs compile
+            tic = time.perf_counter()
+            f(*args, **kwargs)
+            toc = time.perf_counter()
+            print(f"compilation takes {toc - tic}s.")
+
+        tic = time.perf_counter()
+        result = f(*args, **kwargs)
+        for i in range(n - 1):
             result = f(*args, **kwargs)
-        print("------------------------------------------------------------------------")
-        tic = time.time()
-        for i in range(n):
-            result = f(*args, **kwargs)
-        total_time = time.time() - tic
-        print(f"time elapsed: {total_time}s. Average running time: {total_time / n}s")
+        toc = time.perf_counter()
+        total_time = toc - tic
+        print(f"time elapsed {total_time}s for {n} runs. Average: {total_time / n}s each run.")
         return result
+
     return wrapper
 
 

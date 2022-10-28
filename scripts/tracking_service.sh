@@ -10,9 +10,9 @@ END_FRAME=10000  # exclusive
 python tracking_service.py \
     --dataset $DATASET \
     --video $VIDEO \
-    --rod_mesh_file "pcd/yale/struct_with_socks_new.ply" \
-    --top_endcap_mesh_file "pcd/yale/end_cap_top_new.obj" \
-    --bottom_endcap_mesh_file "pcd/yale/end_cap_bottom_new.obj" \
+    --rod_mesh_file "../pcd/yale/struct_with_socks_new.ply" \
+    --top_endcap_mesh_file "../pcd/yale/end_cap_top_new.obj" \
+    --bottom_endcap_mesh_file "../pcd/yale/end_cap_bottom_new.obj" \
     --method $METHOD \
     --start_frame $START_FRAME \
     --end_frame $END_FRAME \
