@@ -54,7 +54,7 @@ roslaunch_add_file_check(launch)
 ## Generate services in the 'srv' folder
 add_service_files(
   FILES
-  init_tracker.srv
+  InitTracker.srv
 )
 
 ## Generate actions in the 'action' folder

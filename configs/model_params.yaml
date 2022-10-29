@@ -1,5 +1,5 @@
 ---
-render_scale: 2
+render_scale: 1
 max_correspondence_distances: [0.3, 0.15, 0.1, 0.06, 0.03]
 num_dummy_points: 50
 dummy_weights: 0.1
@@ -8,4 +8,5 @@ use_adaptive_weights: true
 filter_observed_pts: true
 add_physical_constraints: true
 add_ground_constraints: true
+visualize: true
 save: false

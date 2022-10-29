@@ -29,7 +29,7 @@ import rospy
 from cv_bridge import CvBridge
 from std_msgs.msg import Float64MultiArray
 from sensor_msgs.msg import Image
-from tensegrity_perception.srv import init_tracker
+from tensegrity_perception.srv import InitTracker, InitTrackerRequest, InitTrackerResponse
 
 global endcap_id
 global endcap_color
@@ -93,7 +93,7 @@ class Tracker:
             self.G.edges[u, v]['color'] = color
             self.G.edges[u, v]['pose_list'] = []
 
-        self.init_tracker_srv = rospy.Service('initialize_tracker', init_tracker, self.initialize_tracker)
+        self.init_tracker_srv = rospy.Service('init_tracker', InitTracker, self.initialize_tracker)
 
         self.bridge = CvBridge()
         self.current_state = None
@@ -101,19 +101,23 @@ class Tracker:
         self.depth_im = None
         self.initialized = False
 
-    def initialize_tracker(self, req):
+    def initialize_tracker(self, req: InitTrackerRequest):
+        rospy.loginfo("Received request.")
         rgb_im = self.bridge.imgmsg_to_cv2(req.rgb_im, 'rgb8')
-        depth_im = self.bridge.imgmsg_to_cv2(req.depth_im, 'mono16')
-        hsv_im = cv2.cvtColor(self.rgb_im, cv2.COLOR_RGB2HSV)
+        depth_im = self.bridge.imgmsg_to_cv2(req.depth_im, 'mono16').astype(np.float32) / self.data_cfg['depth_scale']
+        hsv_im = cv2.cvtColor(rgb_im, cv2.COLOR_RGB2HSV)
+
+        self.rgb_im = rgb_im
+        self.depth_im = depth_im
 
         info = defaultdict(dict)
-        for i, length in enumerate(np.asarray(req.cable_lengths)):
-            info['sensors'][i] = {'length': length}
+        for i, length in enumerate(req.cable_lengths.data):
+            info['sensors'][str(i)] = {'length': length}
 
         cam_intr = np.asarray(self.data_cfg['cam_intr'])
         fx, fy, cx, cy = cam_intr[0, 0], cam_intr[1, 1], cam_intr[0, 2], cam_intr[1, 2]
 
-        scene_pcd = create_pcd(depth_im, self.data_cfg['cam_intr'], rgb_im, depth_trunc=self.data_cfg['depth_trunc'])
+        scene_pcd = create_pcd(depth_im, cam_intr, rgb_im, depth_trunc=self.data_cfg['depth_trunc'])
         if 'cam_extr' not in self.data_cfg:
             plane_frame, _ = plane_detection_ransac(scene_pcd, inlier_thresh=0.003, visualize=self.cfg.visualize)
             self.data_cfg['cam_extr'] = np.round(plane_frame, decimals=3)
@@ -193,9 +197,14 @@ class Tracker:
 
         if self.cfg.visualize:
             pcd = self.get_3d_vis()
-            o3d.visualization.draw_geometries([pcd])
+            frame = o3d.geometry.TriangleMesh().create_coordinate_frame(size=0.1)
+            o3d.visualization.draw_geometries([pcd, frame])
+            # o3d.visualization.draw_geometries_with_editing([pcd])
 
         self.initialized = True
+        response = InitTrackerResponse()
+        response.initialized = True
+        return response
 
     def compute_obs_pts(self, depth_im, mask):
         fx, fy = self.data_cfg['cam_intr'][0][0], self.data_cfg['cam_intr'][1][1]
@@ -737,7 +746,7 @@ class Tracker:
             rod_pcd.transform(rod_pose)
             robot_pcd += rod_pcd
 
-        scene_pcd = create_pcd(self.depth_im, self.data_cfg['cam_intr'], self.rgb_im, self.data_cfg['depth_trunc'])
+        scene_pcd = create_pcd(self.depth_im, self.data_cfg['cam_intr'], self.rgb_im)
         robot_pts = np.asarray(robot_pcd.points)
         bbox = o3d.geometry.AxisAlignedBoundingBox()
         bbox.min_bound = np.min(robot_pts, axis=0) - 0.05
