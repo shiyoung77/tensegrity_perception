@@ -23,13 +23,17 @@ import pyrender
 from pyrender.constants import RenderFlags
 from easydict import EasyDict
 
-from perception_utils import create_pcd, plane_detection_ransac, vis_pcd
+from perception_utils import create_pcd, plane_detection_ransac
 
+# ROS library
 import rospy
+import message_filters
 from cv_bridge import CvBridge
-from std_msgs.msg import Float64MultiArray
 from sensor_msgs.msg import Image
 from geometry_msgs.msg import Pose
+# =============================== Untested ==================================
+from tensegrity.msg import SensorsStamped
+# ===========================================================================
 from tensegrity_perception.srv import InitTracker, InitTrackerRequest, InitTrackerResponse
 from tensegrity_perception.srv import GetPose, GetPoseRequest, GetPoseResponse
 
@@ -95,10 +99,24 @@ class Tracker:
             self.G.edges[u, v]['color'] = color
             self.G.edges[u, v]['pose_list'] = []
 
+        # ros service
         self.init_tracker_srv_name = 'init_tracker'
         self.get_pose_srv_name = 'get_pose'
         self.init_tracker_srv = rospy.Service(self.init_tracker_srv_name, InitTracker, self.initialize_tracker)
         self.get_pose_srv = rospy.Service(self.get_pose_srv_name, GetPose, self.get_current_state)
+
+        # ros subscriber
+        # =============================== Untested ==================================
+        self.rgb_topic = "/rgb_images"
+        self.depth_topic = "/depth_images"
+        self.strain_topic = "/strain_msg"
+        color_im_sub = message_filters.Subscriber(self.rgb_topic, Image)
+        depth_im_sub = message_filters.Subscriber(self.depth_topic, Image)
+        strain_sub = message_filters.Subscriber(self.strain_topic, SensorsStamped)
+        self.time_synchronizer = message_filters.ApproximateTimeSynchronizer(
+            [color_im_sub, depth_im_sub, strain_sub], queue_size=10, slop=0.1)
+        self.time_synchronizer.registerCallback(self.tracking_callback)
+        # ===========================================================================
 
         self.bridge = CvBridge()
         self.current_state = None
@@ -267,8 +285,16 @@ class Tracker:
 
         return u_pts, v_pts
 
-    def update(self, rgb_im, depth_im, info):
-        assert self.initialized, "[Error] You must first initialize the tracker!"
+    def tracking_callback(self, rgb_msg, depth_msg, strain_msg):
+        if not self.initialized:
+            return
+
+        rgb_im = self.bridge.imgmsg_to_cv2(rgb_msg, 'rgb8')
+        depth_im = self.bridge.imgmsg_to_cv2(depth_msg, 'mono16').astype(np.float32) / self.data_cfg['depth_scale']
+        info = defaultdict(dict)
+        for sensor in strain_msg.sensors:
+            info['sensors'][sensor.id] = {'length': sensor.length, 'capacitance': sensor.capacitance}
+
         self.rgb_im = rgb_im
         self.depth_im = depth_im
 
@@ -369,6 +395,14 @@ class Tracker:
                 delta_T = curr_pose @ la.inv(prev_pose)
                 model_pcd_dict[u].transform(delta_T)
                 model_pcd_dict[v].transform(delta_T)
+
+        # This could be slow if your GPU is not powerful since it requires image rendering
+        # vis_im = self.get_2d_vis()
+        # vis_im_bgr = cv2.cvtColor(vis_im, cv2.COLOR_RGB2BGR)
+        # cv2.imshow("estimation", vis_im_bgr)
+        # key = cv2.waitKey(1)
+        # if key == ord('q'):
+        #     exit(0)
         return
 
     @staticmethod
