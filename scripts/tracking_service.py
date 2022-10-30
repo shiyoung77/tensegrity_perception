@@ -29,7 +29,9 @@ import rospy
 from cv_bridge import CvBridge
 from std_msgs.msg import Float64MultiArray
 from sensor_msgs.msg import Image
+from geometry_msgs.msg import Pose
 from tensegrity_perception.srv import InitTracker, InitTrackerRequest, InitTrackerResponse
+from tensegrity_perception.srv import GetPose, GetPoseRequest, GetPoseResponse
 
 global endcap_id
 global endcap_color
@@ -93,7 +95,10 @@ class Tracker:
             self.G.edges[u, v]['color'] = color
             self.G.edges[u, v]['pose_list'] = []
 
-        self.init_tracker_srv = rospy.Service('init_tracker', InitTracker, self.initialize_tracker)
+        self.init_tracker_srv_name = 'init_tracker'
+        self.get_pose_srv_name = 'get_pose'
+        self.init_tracker_srv = rospy.Service(self.init_tracker_srv_name, InitTracker, self.initialize_tracker)
+        self.get_pose_srv = rospy.Service(self.get_pose_srv_name, GetPose, self.get_current_state)
 
         self.bridge = CvBridge()
         self.current_state = None
@@ -101,8 +106,29 @@ class Tracker:
         self.depth_im = None
         self.initialized = False
 
+    def get_current_state(self, req: GetPoseRequest):
+        # may have data racing issue, not sure how to solve
+        rospy.loginfo(f"Received '{self.get_pose_srv_name}' service request.")
+        response = GetPoseResponse()
+        try:
+            for color in self.data_cfg['end_cap_colors']:
+                u, v = self.data_cfg['color_to_rod'][color]
+                T = self.G.edges[u, v]['pose_list'][-1].copy()
+                R = T[:3, :3]
+                t = T[:3, 3]
+                pose = Pose()
+                pose.position.x, pose.position.y, pose.position.z = t
+                pose.orientation.x, pose.orientation.y, pose.orientation.z, pose.orientation.w = \
+                    Rotation.from_matrix(R).as_quat()  # x,y,z,w
+                response.poses.append(pose)
+        except IndexError:
+            response.success = False
+            return response
+        response.success = True
+        return response
+
     def initialize_tracker(self, req: InitTrackerRequest):
-        rospy.loginfo("Received request.")
+        rospy.loginfo(f"Received '{self.init_tracker_srv_name}' service request.")
         rgb_im = self.bridge.imgmsg_to_cv2(req.rgb_im, 'rgb8')
         depth_im = self.bridge.imgmsg_to_cv2(req.depth_im, 'mono16').astype(np.float32) / self.data_cfg['depth_scale']
         hsv_im = cv2.cvtColor(rgb_im, cv2.COLOR_RGB2HSV)
@@ -203,7 +229,7 @@ class Tracker:
 
         self.initialized = True
         response = InitTrackerResponse()
-        response.initialized = True
+        response.success = True
         return response
 
     def compute_obs_pts(self, depth_im, mask):

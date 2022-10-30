@@ -2,21 +2,17 @@
 
 import os
 import json
-import time
-import copy
-from argparse import ArgumentParser
 
 import numpy as np
 import cv2
-import open3d as o3d
+from scipy.spatial.transform import Rotation
 
 import rospy
 import rosgraph
 import cv_bridge
 from std_msgs.msg import Float64MultiArray
 from tensegrity_perception.srv import InitTracker, InitTrackerRequest, InitTrackerResponse
-
-from perception_utils import create_pcd
+from tensegrity_perception.srv import GetPose, GetPoseRequest, GetPoseResponse
 
 
 def init_tracker(rgb_im: np.ndarray, depth_im: np.ndarray, cable_lengths: np.ndarray):
@@ -39,9 +35,35 @@ def init_tracker(rgb_im: np.ndarray, depth_im: np.ndarray, cable_lengths: np.nda
         init_tracker_srv = rospy.ServiceProxy(service_name, InitTracker)
         rospy.loginfo("Request sent. Waiting for response...")
         response: InitTrackerResponse = init_tracker_srv(request)
-        return response.initialized
+        rospy.loginfo(f"Got response. Request success: {response.success}")
+        return response.success
     except rospy.ServiceException as e:
-        print(f"Service call failed: {e}")
+        rospy.loginfo(f"Service call failed: {e}")
+    return False
+
+
+def get_pose():
+    service_name = "get_pose"
+    rospy.loginfo(f"Waiting for {service_name} service...")
+    rospy.wait_for_service(service_name)
+    rospy.loginfo(f"Found {service_name} service.")
+    poses = []
+    try:
+        request = GetPoseRequest()
+        get_pose_srv = rospy.ServiceProxy(service_name, GetPose)
+        rospy.loginfo("Request sent. Waiting for response...")
+        response: GetPoseResponse = get_pose_srv(request)
+        rospy.loginfo(f"Got response. Request success: {response.success}")
+        if response.success:
+            for pose in response.poses:
+                T = np.eye(4)
+                T[:3, 3] = [pose.position.x, pose.position.y, pose.position.z]
+                T[:3, :3] = Rotation.from_quat([pose.orientation.x, pose.orientation.y, pose.orientation.z,
+                                                pose.orientation.w]).as_matrix()
+                poses.append(T)
+    except rospy.ServiceException as e:
+        rospy.loginfo(f"Service call failed: {e}")
+    return poses
 
 
 def main():
@@ -61,18 +83,6 @@ def main():
 
     rgb_im = cv2.cvtColor(cv2.imread(color_path), cv2.COLOR_BGR2RGB)
     depth_im = cv2.imread(depth_path, cv2.IMREAD_UNCHANGED)
-    # depth_im = cv2.imread(depth_path, cv2.IMREAD_UNCHANGED).astype(np.float32) / 4000
-
-    cam_intr = np.array([
-        [601.67626953125, 0.0, 325.53509521484375],
-        [0.0, 601.7260131835938, 248.60618591308594],
-        [0.0, 0.0, 1.0]
-    ])
-
-    # pcd = create_pcd(depth_im, cam_intr, rgb_im)
-    # o3d.visualization.draw_geometries_with_editing([pcd])
-
-    print(depth_im[100, 100])
     with open(info_path, 'r') as f:
         info = json.load(f)
     cable_lengths = np.zeros(len(info['sensors']))
@@ -80,6 +90,8 @@ def main():
         cable_lengths[int(key)] = sensor_data['length']
 
     init_tracker(rgb_im, depth_im, cable_lengths)
+    success, poses = get_pose()
+    print(poses)
 
 
 if __name__ == "__main__":
