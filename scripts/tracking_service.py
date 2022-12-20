@@ -1,4 +1,4 @@
-#!/home/lsy/anaconda3/envs/tensegrity/bin/python
+#!/home/willjohnson/miniconda3/envs/tensegrity/bin/python
 
 import os
 import time
@@ -32,10 +32,12 @@ from cv_bridge import CvBridge
 from sensor_msgs.msg import Image
 from geometry_msgs.msg import Pose
 # =============================== Untested ==================================
-from tensegrity.msg import SensorsStamped
+from tensegrity.msg import SensorsStamped, TensegrityStamped
 # ===========================================================================
 from tensegrity_perception.srv import InitTracker, InitTrackerRequest, InitTrackerResponse
 from tensegrity_perception.srv import GetPose, GetPoseRequest, GetPoseResponse
+
+from numba import njit, prange
 
 global endcap_id
 global endcap_color
@@ -109,13 +111,14 @@ class Tracker:
         # =============================== Untested ==================================
         self.rgb_topic = "/rgb_images"
         self.depth_topic = "/depth_images"
-        self.strain_topic = "/strain_msg"
+        self.strain_topic = "/control_msg"
         color_im_sub = message_filters.Subscriber(self.rgb_topic, Image)
         depth_im_sub = message_filters.Subscriber(self.depth_topic, Image)
-        strain_sub = message_filters.Subscriber(self.strain_topic, SensorsStamped)
+        strain_sub = message_filters.Subscriber(self.strain_topic, TensegrityStamped)
         self.time_synchronizer = message_filters.ApproximateTimeSynchronizer(
-            [color_im_sub, depth_im_sub, strain_sub], queue_size=10, slop=0.1)
+            [color_im_sub, depth_im_sub, strain_sub], queue_size=100, slop=0.1)
         self.time_synchronizer.registerCallback(self.tracking_callback)
+        self.count = 0
         # ===========================================================================
 
         self.bridge = CvBridge()
@@ -132,6 +135,7 @@ class Tracker:
             for color in self.data_cfg['end_cap_colors']:
                 u, v = self.data_cfg['color_to_rod'][color]
                 T = self.G.edges[u, v]['pose_list'][-1].copy()
+                T = np.matmul(self.data_cfg['cam_extr'],T)
                 R = T[:3, :3]
                 t = T[:3, 3]
                 pose = Pose()
@@ -143,11 +147,16 @@ class Tracker:
             response.success = False
             return response
         response.success = True
+
+        # # visualize tracking
+        # cv2.imshow('Tracking Result',self.get_2d_vis_fast())
+        # cv2.waitKey(500)
+
         return response
 
     def initialize_tracker(self, req: InitTrackerRequest):
         rospy.loginfo(f"Received '{self.init_tracker_srv_name}' service request.")
-        rgb_im = self.bridge.imgmsg_to_cv2(req.rgb_im, 'rgb8')
+        rgb_im = self.bridge.imgmsg_to_cv2(req.rgb_im, 'bgr8')
         depth_im = self.bridge.imgmsg_to_cv2(req.depth_im, 'mono16').astype(np.float32) / self.data_cfg['depth_scale']
         hsv_im = cv2.cvtColor(rgb_im, cv2.COLOR_RGB2HSV)
 
@@ -207,6 +216,9 @@ class Tracker:
 
                     # check whether this point is in the HSV range of the endcap color
                     lowerb, upperb = self.data_cfg['hsv_ranges'][endcap_color]
+                    print(endcap_color)
+                    print(lowerb)
+                    print(upperb)
                     hsv = point['hsv']
                     if np.any(hsv < np.asarray(lowerb)) or np.any(hsv > np.asarray(upperb)):
                         self.G.nodes[endcap_id]['confidence'] = 0
@@ -286,14 +298,16 @@ class Tracker:
         return u_pts, v_pts
 
     def tracking_callback(self, rgb_msg, depth_msg, strain_msg):
+        print("Recieved tracking data " + str(self.count))
+        self.count += 1
         if not self.initialized:
             return
 
-        rgb_im = self.bridge.imgmsg_to_cv2(rgb_msg, 'rgb8')
+        rgb_im = self.bridge.imgmsg_to_cv2(rgb_msg, 'bgr8')
         depth_im = self.bridge.imgmsg_to_cv2(depth_msg, 'mono16').astype(np.float32) / self.data_cfg['depth_scale']
         info = defaultdict(dict)
         for sensor in strain_msg.sensors:
-            info['sensors'][sensor.id] = {'length': sensor.length, 'capacitance': sensor.capacitance}
+            info['sensors'][str(sensor.id)] = {'length': sensor.length, 'capacitance': sensor.capacitance}
 
         self.rgb_im = rgb_im
         self.depth_im = depth_im
@@ -403,6 +417,13 @@ class Tracker:
         # key = cv2.waitKey(1)
         # if key == ord('q'):
         #     exit(0)
+
+        # visualize tracking
+        tracking_result_im = self.get_2d_vis_fast()
+        tracking_result_bgr = cv2.cvtColor(tracking_result_im, cv2.COLOR_RGB2BGR)
+        cv2.imshow('Tracking Result',tracking_result_bgr)
+        cv2.waitKey(1)
+
         return
 
     @staticmethod
@@ -523,6 +544,10 @@ class Tracker:
             binary_loss = 0
             for sensor_id, (u, v) in self.data_cfg['sensor_to_tendon'].items():
                 sensor_id = str(sensor_id)
+                # print(list(sensor_measurement.keys()))
+                # print(type(list(sensor_measurement.keys())[0]))
+                # print(list(self.data_cfg["sensor_status"].keys()))
+                # print(type(list(self.data_cfg["sensor_status"].keys())[0]))
                 if not self.data_cfg["sensor_status"][sensor_id] or sensor_measurement[sensor_id]['length'] <= 0:
                     continue
 
@@ -819,6 +844,45 @@ class Tracker:
         rospy.loginfo("Tracking service started but not initialized yet.")
         rospy.loginfo("Waiting for requests to initialize.")
         rospy.spin()
+
+    @njit
+    def project_xyz_to_color(color_im, depth_im, xyz, cam_intr, color):
+        im_h, im_w = depth_im.shape
+        fx, fy = cam_intr[0, 0], cam_intr[1, 1]
+        cx, cy = cam_intr[0, 2], cam_intr[1, 2]
+
+        for i in prange(xyz.shape[0]):
+            x = int(np.round((xyz[i, 0] * fx / xyz[i, 2]) + cx))
+            y = int(np.round((xyz[i, 1] * fy / xyz[i, 2]) + cy))
+            if x < 0 or x >= im_w or y < 0 or y >= im_h:
+                continue
+            if (depth_im[y, x] == 0) or (depth_im[y, x] > xyz[i, 2]):
+                color_im[y, x] = color
+
+    def render_current_state_fast(self):
+        vis_im_overlapping = np.copy(self.rgb_im)
+        vis_im_endcap_only = np.zeros_like(self.rgb_im)
+        cam_intr = np.asarray(self.data_cfg['cam_intr'])
+        mapping = {'red': np.array([255, 0, 0]), 'green': np.array([0, 255, 0]), 'blue': np.array([0, 0, 255])}
+        for color, (u, v) in self.data_cfg['color_to_rod'].items():
+            pose = self.G.edges[u, v]['pose_list'][-1]
+            R = pose[:3, :3]
+            t = pose[:3, 3:]
+            pts = R @ np.asarray(self.rod_pcd.points).T + t  # 3, N
+            pts = pts.T  # N, 3
+            Tracker.project_xyz_to_color(vis_im_overlapping, self.depth_im, pts, cam_intr, mapping[color])
+            Tracker.project_xyz_to_color(vis_im_endcap_only, np.zeros_like(self.depth_im), pts, cam_intr, mapping[color])
+        return vis_im_overlapping, vis_im_endcap_only
+
+    def get_2d_vis_fast(self):
+        H, W = self.data_cfg['im_h'], self.data_cfg['im_w']
+        vis_im_overlapping, vis_im_endcap_only = self.render_current_state_fast()
+        vis_im = np.empty((H*2, W*2, 3), dtype=np.uint8)
+        vis_im[:H, :W] = self.rgb_im
+        vis_im[H:, :W] = self.obs_vis
+        vis_im[:H, W:] = vis_im_overlapping
+        vis_im[H:, W:] = vis_im_endcap_only
+        return vis_im
 
 
 def main():

@@ -1,4 +1,4 @@
-#!/home/lsy/anaconda3/envs/tensegrity/bin/python
+#!/home/willjohnson/miniconda3/envs/tensegrity/bin/python
 
 import os
 import json
@@ -73,7 +73,7 @@ def main():
 
     rospy.init_node("tracking_client", anonymous=True)
 
-    dataset = '/home/lsy/dataset/tensegrity'
+    dataset ="/home/willjohnson/catkin_ws/src/tensegrity/src/tensegrity_perception/dataset"
     video = 'pebbles9'
     video_path = os.path.join(dataset, video)
 
@@ -90,7 +90,7 @@ def main():
         cable_lengths[int(key)] = sensor_data['length']
 
     init_tracker(rgb_im, depth_im, cable_lengths)
-    success, poses = get_pose()
+    poses = get_pose()
     print(poses)
 
 
