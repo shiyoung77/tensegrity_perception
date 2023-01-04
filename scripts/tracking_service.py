@@ -119,6 +119,7 @@ class Tracker:
             [color_im_sub, depth_im_sub, strain_sub], queue_size=100, slop=0.1)
         self.time_synchronizer.registerCallback(self.tracking_callback)
         self.count = 0
+        self.prev_timestamp = 0
         # ===========================================================================
 
         self.bridge = CvBridge()
@@ -298,9 +299,19 @@ class Tracker:
         return u_pts, v_pts
 
     def tracking_callback(self, rgb_msg, depth_msg, strain_msg):
-        print("Recieved tracking data " + str(self.count))
         self.count += 1
+        this_timestamp = rgb_msg.header.stamp.to_sec()
+
+        # skip frames to run real-time at 10 Hz
+        if this_timestamp - self.prev_timestamp < 0.1:
+            print("Ignoring tracking frame " + str(self.count))
+            return
+        
+        self.prev_timestamp = this_timestamp
+        print("Processing tracking frame " + str(self.count))
+
         if not self.initialized:
+            print('Tracking service not initialized yet')
             return
 
         rgb_im = self.bridge.imgmsg_to_cv2(rgb_msg, 'bgr8')
