@@ -1,11 +1,13 @@
 import os
+import sys
 import time
 import copy
 import importlib
 import pprint
 import json
 from argparse import ArgumentParser
-from typing import List, Dict
+from typing import Dict
+from colorsys import rgb_to_hsv
 
 import numpy as np
 import numpy.linalg as la
@@ -15,14 +17,14 @@ import open3d as o3d
 from scipy.optimize import minimize
 from scipy.spatial import KDTree
 from scipy.spatial.transform import Rotation
-from matplotlib import pyplot as plt
 from tqdm import tqdm
 import trimesh
 from trimesh.sample import sample_surface_even
 import pyrender
 from pyrender.constants import RenderFlags
+from numba import njit, prange
 
-from perception_utils import create_pcd, plane_detection_ransac, vis_pcd
+from perception_utils import create_pcd, plane_detection_ransac
 
 
 class Tracker:
@@ -85,6 +87,9 @@ class Tracker:
             self.G.edges[u, v]['color'] = color
             self.G.edges[u, v]['pose_list'] = []
 
+        self.rgb_im = None
+        self.depth_im = None
+        self.hsv_im = None
 
     def initialize(self, rgb_im: np.ndarray, depth_im: np.ndarray, info: dict):
         self.rgb_im = rgb_im
@@ -101,59 +106,23 @@ class Tracker:
 
         if 'init_endcap_pos' not in self.data_cfg:
             self.data_cfg['init_endcap_pos'] = dict()
-            rgb_im_copy = np.copy(rgb_im)
-            fig, ax = plt.subplots(1, 1)
-            ax.imshow(rgb_im_copy)
+            print(f"\nPick one point for each endcap. Need {len(self.G.nodes)} in total.")
+            pt_indices = self.pick_points(scene_pcd)
+            pts = np.asarray(scene_pcd.points)[pt_indices]
+            normalized_rgb_values = np.asarray(scene_pcd.colors)[pt_indices]
+            for endcap_id, (pos, rgb) in enumerate(zip(pts, normalized_rgb_values)):
+                self.data_cfg['init_endcap_pos'][str(endcap_id)] = pos.tolist()
 
-            global endcap_id
-            endcap_id = 0
-            endcap_color = self.G.nodes[endcap_id]['color']
-            plt.get_current_fig_manager().set_window_title(f"Select #{endcap_id} endcap ({endcap_color})")
-
-            def get_point(event):
-                if event.xdata and event.ydata:
-                    x = int(round(event.xdata))
-                    y = int(round(event.ydata))
-                    rgb = list(rgb_im_copy[y, x])
-                    hsv = list(self.hsv_im[y, x])
-                    Z = float(self.depth_im[y, x])
-                    X = float((x - cx) * Z / fx)
-                    Y = float((y - cy) * Z / fy)
-                    if Z == 0:
-                        print(f"2D pos: ({x}, {y}), 3D pos: N/A, rgb: {rgb}, hsv: {hsv}")
-                    else:
-                        print(f"2D pos: ({x}, {y}), 3D pos: ({X:.3f}, {Y:.3f}, {Z:.3f}), rgb: {rgb}, hsv: {hsv}")
-                    return {'pos_2d': [x, y], 'pos_3d': [X, Y, Z], 'rgb': rgb, 'hsv': hsv}
-
-            def mouse_click_callback(event):
-                global endcap_id
+                # check whether this point is in the HSV range of the endcap color
                 endcap_color = self.G.nodes[endcap_id]['color']
-                point = get_point(event)
-                if point and point['pos_3d'][-1] != 0:
-                    print("===========================================================================================")
-                    print(f"#{endcap_id} endcap ({self.G.nodes[endcap_id]['color']})")
-                    pprint.pprint(point)
-                    print("===========================================================================================")
-                    self.data_cfg['init_endcap_pos'][str(endcap_id)] = point['pos_3d']
-
-                    # check whether this point is in the HSV range of the endcap color
-                    lowerb, upperb = self.data_cfg['hsv_ranges'][endcap_color]
-                    hsv = point['hsv']
-                    if np.any(hsv < np.asarray(lowerb)) or np.any(hsv > np.asarray(upperb)):
-                        self.G.nodes[endcap_id]['confidence'] = 0
-                    else:
-                        self.G.nodes[endcap_id]['confidence'] = 1
-
-                    endcap_id += 1
-                    if endcap_id < len(self.G.nodes):
-                        endcap_color = self.G.nodes[endcap_id]['color']
-                        plt.get_current_fig_manager().set_window_title(f"Select #{endcap_id} endcap ({endcap_color})")
-                    else:
-                        plt.close()
-
-            fig.canvas.mpl_connect('motion_notify_event', get_point)
-            fig.canvas.mpl_connect('button_press_event', mouse_click_callback)
-            plt.show()
+                lower_bound, upper_bound = self.data_cfg['hsv_ranges'][endcap_color]
+                hsv = np.array(rgb_to_hsv(*rgb)) * 255
+                if np.any(hsv < np.asarray(lower_bound)) or np.any(hsv > np.asarray(upper_bound)):
+                    self.G.nodes[endcap_id]['confidence'] = 0
+                    print(f"The HSV value of {endcap_id = } is not within the HSV threshold. "
+                          f"Either a random point is picked or the HSV threshold has to be updated.")
+                else:
+                    self.G.nodes[endcap_id]['confidence'] = 1
 
         # -------------------- optimize once --------------------
         for _, (u, v) in self.data_cfg['color_to_rod'].items():
@@ -176,7 +145,6 @@ class Tracker:
 
         self.initialized = True
 
-
     def compute_obs_pts(self, depth_im, mask):
         fx, fy = self.data_cfg['cam_intr'][0][0], self.data_cfg['cam_intr'][1][1]
         cx, cy = self.data_cfg['cam_intr'][0][2], self.data_cfg['cam_intr'][1][2]
@@ -187,7 +155,6 @@ class Tracker:
         pts[:, 0] = (xs - cx) / fx * pts[:, 2]
         pts[:, 1] = (ys - cy) / fy * pts[:, 2]
         return pts
-
 
     def filter_obs_pts(self, obs_pts, color, radius=0.1, thresh=0.01):
         u, v = self.data_cfg['color_to_rod'][color]
@@ -212,7 +179,6 @@ class Tracker:
             v_pts = v_pts[zs < z_min + thresh]
 
         return u_pts, v_pts
-
 
     def update(self, rgb_im, depth_im, info):
         assert self.initialized, "[Error] You must first initialize the tracker!"
@@ -254,7 +220,7 @@ class Tracker:
             elif color == 'blue':
                 self.obs_vis[hsv_mask, 2] = 255
 
-        for iter, max_distance in enumerate(self.cfg.max_correspondence_distances):
+        for iteration, max_distance in enumerate(self.cfg.max_correspondence_distances):
             prev_poses = {}
             for color, (u, v) in self.data_cfg['color_to_rod'].items():
                 prev_poses[color] = np.copy(self.G.edges[u, v]['pose_list'][-1])
@@ -294,8 +260,10 @@ class Tracker:
                 self.G.nodes[v]['pos_list'][-1] = rod_pose[:3, 3] - rod_pose[:3, 2] * self.rod_length / 2
 
                 if self.cfg.use_adaptive_weights:
-                    self.G.nodes[u]['confidence'] = self.compute_confidence(u_obs_pts, u_rendered_pts, inlier_thresh=max_distance)
-                    self.G.nodes[v]['confidence'] = self.compute_confidence(v_obs_pts, v_rendered_pts, inlier_thresh=max_distance)
+                    self.G.nodes[u]['confidence'] = self.compute_confidence(u_obs_pts, u_rendered_pts,
+                                                                            inlier_thresh=max_distance)
+                    self.G.nodes[v]['confidence'] = self.compute_confidence(v_obs_pts, v_rendered_pts,
+                                                                            inlier_thresh=max_distance)
                 else:
                     self.G.nodes[u]['confidence'] = 1
                     self.G.nodes[v]['confidence'] = 1
@@ -303,7 +271,7 @@ class Tracker:
             # print(f"point registration takes {time.time() - tic}s")
 
             # ================================== correction step ==================================
-            if self.cfg.optimize_every_n_iters != 0 and iter % self.cfg.optimize_every_n_iters == 0:
+            if self.cfg.optimize_every_n_iters != 0 and iteration % self.cfg.optimize_every_n_iters == 0:
                 tic = time.time()
                 self.constrained_optimization(info, sanity_check=True)
                 # print(f"optimization takes {time.time() - tic}s")
@@ -316,8 +284,8 @@ class Tracker:
                 model_pcd_dict[v].transform(delta_T)
         return
 
-
-    def create_scene_node(self, name, mesh, pose):
+    @staticmethod
+    def create_scene_node(name, mesh, pose):
         m = np.array([
             [1, 0, 0, 0],
             [0, -1, 0, 0],
@@ -325,7 +293,6 @@ class Tracker:
             [0, 0, 0, 1]
         ])
         return pyrender.Node(name=name, mesh=mesh, matrix=m @ pose)
-
 
     def render_nodes(self, seg_node_map: Dict[pyrender.Node, int], depth_only: bool = False):
         for node in seg_node_map:
@@ -352,7 +319,6 @@ class Tracker:
             rendered_seg = cv2.resize(rendered_seg, (W*scale, H*scale), interpolation=cv2.INTER_NEAREST)
         return rendered_seg, rendered_depth
 
-
     def render_current_state(self):
         mapping = {'red': 1, 'green': 2, 'blue': 3}
         seg_node_map = dict()
@@ -362,8 +328,8 @@ class Tracker:
             seg_node_map[mesh_node] = mapping[color]
         return self.render_nodes(seg_node_map)
 
-
-    def compute_confidence(self, obs_pts, rendered_pts, inlier_thresh=0.01, min_node_confidence=0.1):
+    @staticmethod
+    def compute_confidence(obs_pts, rendered_pts, inlier_thresh=0.01, min_node_confidence=0.1):
         if len(obs_pts) == 0 or len(rendered_pts) == 0:
             return min_node_confidence
 
@@ -375,7 +341,6 @@ class Tracker:
         numerator = np.sum(o2r_dist < inlier_thresh) + np.sum(r2o_dist < inlier_thresh)
         confidence = numerator / (len(o2r_dist) + len(r2o_dist))  # f1 score
         return max(confidence, min_node_confidence)
-
 
     def constrained_optimization(self, info, sanity_check=True):
         rod_length = self.data_cfg['rod_length']
@@ -448,7 +413,6 @@ class Tracker:
             else:
                 self.G.edges[u, v]['pose_list'].append(optimized_pose)
 
-
     def ground_constraint_generator(self, u):
         cam_to_world = la.inv(self.data_cfg['cam_extr'])
         R = cam_to_world[:3, :3]
@@ -466,7 +430,6 @@ class Tracker:
             return result
 
         return constraint_function, jacobian_function
-
 
     def objective_function_generator(self, info):
         sensor_measurement = info['sensors']
@@ -510,10 +473,10 @@ class Tracker:
             result = np.zeros_like(X)
 
             for i in range(len(self.data_cfg['node_to_color'])):
-                pos_est = X[3 * i : 3 * i + 3]
+                pos_est = X[3 * i: 3 * i + 3]
                 pos_old = self.G.nodes[i]['pos_list'][-1]
                 confidence = self.G.nodes[i].get('confidence', 1)
-                result[3 * i : 3 * i + 3] = 2 * confidence * (pos_est - pos_old)
+                result[3 * i: 3 * i + 3] = 2 * confidence * (pos_est - pos_old)
 
             for sensor_id, (u, v) in self.data_cfg['sensor_to_tendon'].items():
                 sensor_id = str(sensor_id)
@@ -526,7 +489,7 @@ class Tracker:
                 if c_u > 0.5 and c_v > 0.5:
                     factor = 0
                 elif c_u > 0.2 and c_v > 0.2:
-                    factor *= (1 - 0.5*(c_u + c_v))
+                    factor *= (1 - 0.5 * (c_u + c_v))
 
                 u_pos = X[(3 * u):(3 * u + 3)]
                 v_pos = X[(3 * v):(3 * v + 3)]
@@ -537,15 +500,15 @@ class Tracker:
                 if np.abs(l_est - l_gt) > 0.1:
                     factor = 0
 
-                result[3 * u : 3 * u + 3] += 2 * factor * (l_est - l_gt) * (u_pos - v_pos) / (l_est + 1e-12)
-                result[3 * v : 3 * v + 3] += 2 * factor * (l_est - l_gt) * (v_pos - u_pos) / (l_est + 1e-12)
+                result[3 * u: 3 * u + 3] += 2 * factor * (l_est - l_gt) * (u_pos - v_pos) / (l_est + 1e-12)
+                result[3 * v: 3 * v + 3] += 2 * factor * (l_est - l_gt) * (v_pos - u_pos) / (l_est + 1e-12)
 
             return result
 
         return objective_function, jacobian_function
 
-
-    def endcap_constraint_generator(self, u, v, rod_length):
+    @staticmethod
+    def endcap_constraint_generator(u, v, rod_length):
 
         def constraint_function(X):
             u_pos = X[3 * u: 3 * u + 3]
@@ -553,16 +516,15 @@ class Tracker:
             return la.norm(u_pos - v_pos) - rod_length
 
         def jacobian_function(X):
-            u_pos = X[3 * u : 3 * u + 3]
-            v_pos = X[3 * v : 3 * v + 3]
+            u_pos = X[3 * u: 3 * u + 3]
+            v_pos = X[3 * v: 3 * v + 3]
             C = la.norm(u_pos - v_pos) + 1e-12
             result = np.zeros_like(X)
-            result[3 * u : 3 * u + 3] = (u_pos - v_pos) / C
-            result[3 * v : 3 * v + 3] = (v_pos - u_pos) / C
+            result[3 * u: 3 * u + 3] = (u_pos - v_pos) / C
+            result[3 * v: 3 * v + 3] = (v_pos - u_pos) / C
             return result
 
         return constraint_function, jacobian_function
-
 
     def rod_constraint_generator(self, u, v, p, q, alpha1, alpha2):
         try:
@@ -570,7 +532,7 @@ class Tracker:
             p2 = self.G.nodes[v]['pos_list'][-2]
             p3 = self.G.nodes[p]['pos_list'][-2]
             p4 = self.G.nodes[q]['pos_list'][-2]
-        except:
+        except IndexError:
             p1 = self.G.nodes[u]['pos_list'][-1]
             p2 = self.G.nodes[v]['pos_list'][-1]
             p3 = self.G.nodes[p]['pos_list'][-1]
@@ -581,10 +543,10 @@ class Tracker:
         v1 /= (la.norm(v1) + 1e-12)
 
         def constraint_function(X):
-            q1 = X[3 * u : 3 * u + 3]
-            q2 = X[3 * v : 3 * v + 3]
-            q3 = X[3 * p : 3 * p + 3]
-            q4 = X[3 * q : 3 * q + 3]
+            q1 = X[3 * u: 3 * u + 3]
+            q2 = X[3 * v: 3 * v + 3]
+            q3 = X[3 * p: 3 * p + 3]
+            q4 = X[3 * q: 3 * q + 3]
             q5 = alpha1 * q1 + (1 - alpha1) * q2  # closest point on (u, v)
             q6 = alpha2 * q3 + (1 - alpha2) * q4  # closest point on (p, q)
             v2 = q5 - q6
@@ -592,14 +554,13 @@ class Tracker:
 
         def jacobian_function(X):
             result = np.zeros_like(X)
-            result[3 * u : 3 * u + 3] = alpha1 * v1
-            result[3 * v : 3 * v + 3] = (1 - alpha1) * v1
-            result[3 * p : 3 * p + 3] = -alpha2 * v1
-            result[3 * q : 3 * q + 3] = -(1 - alpha2) * v1
+            result[3 * u: 3 * u + 3] = alpha1 * v1
+            result[3 * v: 3 * v + 3] = (1 - alpha1) * v1
+            result[3 * p: 3 * p + 3] = -alpha2 * v1
+            result[3 * q: 3 * q + 3] = -(1 - alpha2) * v1
             return result
 
         return constraint_function, jacobian_function
-
 
     @staticmethod
     def estimate_rod_pose_from_endcap_centers(curr_endcap_centers, prev_rod_pose=None):
@@ -626,8 +587,8 @@ class Tracker:
         curr_rod_pose[:3, 3] = curr_rod_pos
         return curr_rod_pose
 
-
-    def register(self, obs_pts, rendered_pts, obs_w=None, rendered_w=None, max_distance=0.02):
+    @staticmethod
+    def register(obs_pts, rendered_pts, obs_w=None, rendered_w=None, max_distance=0.02):
         if obs_w is None:
             obs_w = np.ones(obs_pts.shape[0])
         if rendered_w is None:
@@ -670,11 +631,10 @@ class Tracker:
         T[:3, 3] = t
         return T
 
-
-    # https://math.stackexchange.com/questions/1993953/closest-points-between-two-lines
     @staticmethod
     def compute_closest_pair_of_points(p1: np.ndarray, p2: np.ndarray, p3: np.ndarray, p4: np.ndarray):
-        """compute closest point pairs on two rods (p1, p2) and (p3, p4)
+        """compute the closest point pairs on two rods (p1, p2) and (p3, p4)
+        https://math.stackexchange.com/questions/1993953/closest-points-between-two-lines
 
         Args:
             p1 (np.ndarray): start point of rod 1
@@ -697,7 +657,6 @@ class Tracker:
         alpha1 = 1 - t1 / l1
         alpha2 = 1 - t2 / l2
         return alpha1, alpha2
-
 
     def visualize_closest_pair_of_points(self):
 
@@ -739,44 +698,95 @@ class Tracker:
 
         o3d.visualization.draw_geometries(geometries)
 
-
     def get_2d_vis(self):
-        rendered_seg, rendered_depth = tracker.render_current_state()
+        rendered_seg, rendered_depth = self.render_current_state()
         H, W = self.data_cfg['im_h'], self.data_cfg['im_w']
         vis_im1 = np.copy(self.rgb_im)
         vis_im2 = np.zeros_like(self.rgb_im)
         for i, color in enumerate(['red', 'green', 'blue']):
             mask = rendered_depth.copy()
             mask[rendered_seg != i + 1] = 0
-            vis_im1[depth_im < mask] = Tracker.ColorDict[color]
+            vis_im1[self.depth_im < mask] = Tracker.ColorDict[color]
             vis_im2[mask > 0] = Tracker.ColorDict[color]
         vis_im = np.empty((H*2, W*2, 3), dtype=np.uint8)
         vis_im[:H, :W] = self.rgb_im
-        vis_im[H:, :W] = tracker.obs_vis
+        vis_im[H:, :W] = self.obs_vis
         vis_im[:H, W:] = vis_im1
         vis_im[H:, W:] = vis_im2
         return vis_im
 
+    @staticmethod
+    @njit
+    def project_xyz_to_color(color_im, depth_im, xyz, cam_intr, color):
+        im_h, im_w = depth_im.shape
+        fx, fy = cam_intr[0, 0], cam_intr[1, 1]
+        cx, cy = cam_intr[0, 2], cam_intr[1, 2]
+
+        for i in prange(xyz.shape[0]):
+            x = int(np.round((xyz[i, 0] * fx / xyz[i, 2]) + cx))
+            y = int(np.round((xyz[i, 1] * fy / xyz[i, 2]) + cy))
+            if x < 0 or x >= im_w or y < 0 or y >= im_h:
+                continue
+            if (depth_im[y, x] == 0) or (depth_im[y, x] > xyz[i, 2]):
+                color_im[y, x] = color
+
+    def render_current_state_fast(self):
+        vis_im_overlapping = np.copy(self.rgb_im)
+        vis_im_endcap_only = np.zeros_like(self.rgb_im)
+        cam_intr = np.asarray(self.data_cfg['cam_intr'])
+        mapping = {'red': np.array([255, 0, 0]), 'green': np.array([0, 255, 0]), 'blue': np.array([0, 0, 255])}
+        for color, (u, v) in self.data_cfg['color_to_rod'].items():
+            pose = self.G.edges[u, v]['pose_list'][-1]
+            R = pose[:3, :3]
+            t = pose[:3, 3:]
+            pts = R @ np.asarray(self.rod_pcd.points).T + t  # 3, N
+            pts = pts.T  # N, 3
+            Tracker.project_xyz_to_color(vis_im_overlapping, self.depth_im, pts, cam_intr, mapping[color])
+            Tracker.project_xyz_to_color(vis_im_endcap_only, np.zeros_like(self.depth_im), pts, cam_intr, mapping[color])
+        return vis_im_overlapping, vis_im_endcap_only
+
+    def get_2d_vis_fast(self):
+        H, W = self.data_cfg['im_h'], self.data_cfg['im_w']
+        vis_im_overlapping, vis_im_endcap_only = self.render_current_state_fast()
+        vis_im = np.empty((H*2, W*2, 3), dtype=np.uint8)
+        vis_im[:H, :W] = self.rgb_im
+        vis_im[H:, :W] = self.obs_vis
+        vis_im[:H, W:] = vis_im_overlapping
+        vis_im[H:, W:] = vis_im_endcap_only
+        return vis_im
 
     def get_3d_vis(self):
         robot_pcd = o3d.geometry.PointCloud()
-        for color, (u, v) in data_cfg['color_to_rod'].items():
-            rod_pcd = copy.deepcopy(tracker.rod_pcd)
+        for color, (u, v) in self.data_cfg['color_to_rod'].items():
+            rod_pcd = copy.deepcopy(self.rod_pcd)
             rod_pcd = rod_pcd.paint_uniform_color(np.array(Tracker.ColorDict[color]) / 255)
-            rod_pose = np.copy(tracker.G.edges[u, v]['pose_list'][-1])
+            rod_pose = np.copy(self.G.edges[u, v]['pose_list'][-1])
             rod_pcd.transform(rod_pose)
             robot_pcd += rod_pcd
 
-        scene_pcd = create_pcd(self.depth_im, data_cfg['cam_intr'], self.rgb_im, depth_trunc=data_cfg['depth_trunc'])
+        scene_pcd = create_pcd(self.depth_im, self.data_cfg['cam_intr'], self.rgb_im,
+                               depth_trunc=self.data_cfg['depth_trunc'])
         robot_pts = np.asarray(robot_pcd.points)
         bbox = o3d.geometry.AxisAlignedBoundingBox()
-        bbox.min_bound = robot_pts.min(axis=0) - 0.05
-        bbox.max_bound = robot_pts.max(axis=0) + 0.05
+        bbox.min_bound = np.min(robot_pts, axis=0) - 0.05
+        bbox.max_bound = np.max(robot_pts, axis=0) + 0.05
         scene_pcd = scene_pcd.crop(bbox)
         return robot_pcd + scene_pcd
 
+    @staticmethod
+    def pick_points(pcd):
+        print("1) Please pick at least three correspondences using [shift + left click]")
+        print("   Press [shift + right click] to undo point picking")
+        print("2) After picking points, press 'Q' to close the window")
+        vis = o3d.visualization.VisualizerWithEditing()
+        vis.create_window()
+        vis.add_geometry(pcd)
+        vis.run()  # user picks points
+        vis.destroy_window()
+        return vis.get_picked_points()
 
-if __name__ == '__main__':
+
+def main():
     parser = ArgumentParser()
     parser.add_argument("--dataset", default="dataset")
     parser.add_argument("--video", default="monday_roll15")
@@ -803,7 +813,8 @@ if __name__ == '__main__':
     prefixes = sorted([i.split('.')[0] for i in os.listdir(os.path.join(video_path, 'color'))])
 
     # read data config
-    data_cfg_module = importlib.import_module(f'{args.dataset}.{args.video}.config')
+    sys.path.append(args.dataset)
+    data_cfg_module = importlib.import_module(f'{args.video}.config')
     data_cfg = data_cfg_module.get_config(read_cfg=True)
 
     # read rod point cloud
@@ -811,7 +822,7 @@ if __name__ == '__main__':
     rod_mesh_o3d = o3d.io.read_triangle_mesh(args.rod_mesh_file)
     rod_pcd = rod_mesh_o3d.sample_points_poisson_disk(1000)
 
-    # read rod and end cap trimesh for for rendering
+    # read rod and end cap trimesh for rendering
     rod_mesh = pyrender.Mesh.from_trimesh(trimesh.load_mesh(args.rod_mesh_file))
     # top_endcap_mesh = pyrender.Mesh.from_trimesh(trimesh.load_mesh(args.top_endcap_mesh_file))
     # bottom_endcap_mesh = pyrender.Mesh.from_trimesh(trimesh.load_mesh(args.bottom_endcap_mesh_file))
@@ -864,7 +875,8 @@ if __name__ == '__main__':
         total_time += time.time() - tic
 
         if args.visualize:
-            vis_im = tracker.get_2d_vis()
+            # vis_im = tracker.get_2d_vis()
+            vis_im = tracker.get_2d_vis_fast()
             vis_im_bgr = cv2.cvtColor(vis_im, cv2.COLOR_RGB2BGR)
             cv2.imshow("estimation", vis_im_bgr)
             key = cv2.waitKey(1)
@@ -872,8 +884,10 @@ if __name__ == '__main__':
                 exit(0)
 
             if args.save:
-                cv2.imwrite(os.path.join(video_path, f'estimation_vis-{args.method}', f'{prefix}.jpg'), vis_im_bgr)
-                o3d.io.write_point_cloud(os.path.join(video_path, f"estimation_cloud-{args.method}", f"{idx:04d}.pcd"), tracker.get_3d_vis())
+                output_vis_im_path = os.path.join(video_path, f'estimation_vis-{args.method}', f'{prefix}.jpg')
+                output_pcd_path = os.path.join(video_path, f"estimation_cloud-{args.method}", f"{idx:04d}.pcd")
+                cv2.imwrite(output_vis_im_path, vis_im_bgr)
+                o3d.io.write_point_cloud(output_pcd_path, tracker.get_3d_vis())
     print(f"FPS: {(end_frame - args.start_frame + 1e-12) / total_time}")
 
     # save rod poses and end cap positions to file
@@ -884,3 +898,7 @@ if __name__ == '__main__':
             np.save(os.path.join(pose_output_folder, f'{color}.npy'), np.array(tracker.G.edges[u, v]['pose_list'])[1:])
             np.save(os.path.join(pose_output_folder, f'{u}_pos.npy'), np.array(tracker.G.nodes[u]['pos_list'])[1:])
             np.save(os.path.join(pose_output_folder, f'{v}_pos.npy'), np.array(tracker.G.nodes[v]['pos_list'])[1:])
+
+
+if __name__ == '__main__':
+    main()
