@@ -7,7 +7,6 @@ import pprint
 import json
 from argparse import ArgumentParser
 from typing import Dict
-from colorsys import rgb_to_hsv
 
 import numpy as np
 import numpy.linalg as la
@@ -116,10 +115,13 @@ class Tracker:
                 # check whether this point is in the HSV range of the endcap color
                 endcap_color = self.G.nodes[endcap_id]['color']
                 lower_bound, upper_bound = self.data_cfg['hsv_ranges'][endcap_color]
-                hsv = np.array(rgb_to_hsv(*rgb)) * 255
+                x = int(np.round(pos[0] * fx / pos[2] + cx))
+                y = int(np.round(pos[1] * fy / pos[2] + cy))
+                hsv = self.hsv_im[y, x]
                 if np.any(hsv < np.asarray(lower_bound)) or np.any(hsv > np.asarray(upper_bound)):
                     self.G.nodes[endcap_id]['confidence'] = 0
-                    print(f"The HSV value of {endcap_id = } is not within the HSV threshold. "
+                    print(f"The HSV value {hsv} of {endcap_id = } is not within the HSV threshold. "
+                          f"HSV {lower_bound = }, {upper_bound = }"
                           f"Either a random point is picked or the HSV threshold has to be updated.")
                 else:
                     self.G.nodes[endcap_id]['confidence'] = 1
