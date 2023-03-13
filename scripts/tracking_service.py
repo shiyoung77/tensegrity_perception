@@ -116,10 +116,15 @@ class Tracker:
         depth_im_sub = message_filters.Subscriber(self.depth_topic, Image)
         strain_sub = message_filters.Subscriber(self.strain_topic, TensegrityStamped)
         self.time_synchronizer = message_filters.ApproximateTimeSynchronizer(
-            [color_im_sub, depth_im_sub, strain_sub], queue_size=100, slop=0.1)
+            [color_im_sub, depth_im_sub, strain_sub], queue_size=10, slop=0.1)
         self.time_synchronizer.registerCallback(self.tracking_callback)
         self.count = 0
         self.prev_timestamp = 0
+        # ros publisher
+        self.perception_topic = "/tracking_images"
+        self.trajectory_topic = "/trajectory_images"
+        self.perception_pub = rospy.Publisher(self.perception_topic, Image, queue_size=10)
+        self.trajectory_pub = rospy.Publisher(self.trajectory_topic, Image, queue_size=10)
         # ===========================================================================
 
         self.bridge = CvBridge()
@@ -157,7 +162,7 @@ class Tracker:
 
     def initialize_tracker(self, req: InitTrackerRequest):
         rospy.loginfo(f"Received '{self.init_tracker_srv_name}' service request.")
-        rgb_im = self.bridge.imgmsg_to_cv2(req.rgb_im, 'bgr8')
+        rgb_im = self.bridge.imgmsg_to_cv2(req.rgb_im, 'rgb8')
         depth_im = self.bridge.imgmsg_to_cv2(req.depth_im, 'mono16').astype(np.float32) / self.data_cfg['depth_scale']
         hsv_im = cv2.cvtColor(rgb_im, cv2.COLOR_RGB2HSV)
 
@@ -299,22 +304,24 @@ class Tracker:
         return u_pts, v_pts
 
     def tracking_callback(self, rgb_msg, depth_msg, strain_msg):
+        # print("I entered a new callback")
         self.count += 1
+        """
         this_timestamp = rgb_msg.header.stamp.to_sec()
-
         # skip frames to run real-time at 10 Hz
         if this_timestamp - self.prev_timestamp < 0.1:
             print("Ignoring tracking frame " + str(self.count))
             return
-        
         self.prev_timestamp = this_timestamp
+        """
         print("Processing tracking frame " + str(self.count))
 
         if not self.initialized:
             print('Tracking service not initialized yet')
             return
 
-        rgb_im = self.bridge.imgmsg_to_cv2(rgb_msg, 'bgr8')
+        # print("Unpacking data...")
+        rgb_im = self.bridge.imgmsg_to_cv2(rgb_msg, 'rgb8')
         depth_im = self.bridge.imgmsg_to_cv2(depth_msg, 'mono16').astype(np.float32) / self.data_cfg['depth_scale']
         info = defaultdict(dict)
         for sensor in strain_msg.sensors:
@@ -323,6 +330,7 @@ class Tracker:
         self.rgb_im = rgb_im
         self.depth_im = depth_im
 
+        # print("Getting observed points...")
         # get observed 3D points for both endcaps of each rod
         obs_pts_dict = dict()
         model_pcd_dict = dict()
@@ -358,7 +366,9 @@ class Tracker:
             elif color == 'blue':
                 self.obs_vis[hsv_mask, 2] = 255
 
+        # print("Beginning iterative optimization...")
         for iteration, max_distance in enumerate(self.cfg.max_correspondence_distances):
+            # print('Iteration ' + str(iteration))
             prev_poses = {}
             for color, (u, v) in self.data_cfg['color_to_rod'].items():
                 prev_poses[color] = np.copy(self.G.edges[u, v]['pose_list'][-1])
@@ -429,12 +439,39 @@ class Tracker:
         # if key == ord('q'):
         #     exit(0)
 
+        # print('Visualizing result...')
         # visualize tracking
         tracking_result_im = self.get_2d_vis_fast()
-        tracking_result_bgr = cv2.cvtColor(tracking_result_im, cv2.COLOR_RGB2BGR)
-        cv2.imshow('Tracking Result',tracking_result_bgr)
-        cv2.waitKey(1)
+        # print('got 2d vis fast')
+        # tracking_result_bgr = cv2.cvtColor(tracking_result_im, cv2.COLOR_RGB2BGR)
+        # print('converted to BGR')
+        tracking_msg = self.bridge.cv2_to_imgmsg(tracking_result_im,'rgb8')
+        tracking_msg.header.stamp = rgb_msg.header.stamp
+        # print('publishing result')
+        self.perception_pub.publish(tracking_msg)
 
+        # experimental work on plotting the trajectory on the camera's image
+        traj_im = self.rgb_im
+        H = np.array(self.data_cfg['cam_extr'])
+        cam_intr = np.array(self.data_cfg['cam_intr'])
+        fx, fy = cam_intr[0, 0], cam_intr[1, 1]
+        cx, cy = cam_intr[0, 2], cam_intr[1, 2]
+        for point in strain_msg.trajectory.trajectory:
+            this_point = np.array([[point.x],[point.y],[0],[1]])
+            XYZ = np.matmul(H,this_point)
+            # for i in range(XYZ.shape[0]):
+            y = int(np.round((XYZ[0] * fx / XYZ[2]) + cx))
+            x = int(np.round((XYZ[1] * fy / XYZ[2]) + cy))
+            traj_im = cv2.circle(traj_im, (x,y), radius=5, color=(0, 0, 255), thickness=-1)
+            print(x,y)
+        trajectory_im_msg = self.bridge.cv2_to_imgmsg(traj_im,'rgb8')
+        trajectory_im_msg.header.stamp = rgb_msg.header.stamp
+        self.trajectory_pub.publish(trajectory_im_msg)
+
+        # cv2.imshow('Tracking Result',tracking_result_bgr)
+        # print('showing result')
+        # cv2.waitKey(1)
+        # print('I reached the end of the callback')
         return
 
     @staticmethod
