@@ -39,9 +39,6 @@ from tensegrity_perception.srv import GetPose, GetPoseRequest, GetPoseResponse
 
 from numba import njit, prange
 
-global endcap_id
-global endcap_color
-
 
 class Tracker:
     ColorDict = {
@@ -183,64 +180,26 @@ class Tracker:
 
         if 'init_endcap_pos' not in self.data_cfg:
             self.data_cfg['init_endcap_pos'] = dict()
-            rgb_im_copy = np.copy(rgb_im)
-            fig, ax = plt.subplots(1, 1)
-            ax.imshow(rgb_im_copy)
+            print(f"\nPick one point for each endcap. Need {len(self.G.nodes)} in total.")
+            pt_indices = self.pick_points(scene_pcd)
+            pts = np.asarray(scene_pcd.points)[pt_indices]
+            normalized_rgb_values = np.asarray(scene_pcd.colors)[pt_indices]
+            for endcap_id, (pos, rgb) in enumerate(zip(pts, normalized_rgb_values)):
+                self.data_cfg['init_endcap_pos'][str(endcap_id)] = pos.tolist()
 
-            global endcap_id
-            global endcap_color
-            endcap_id = 0
-            endcap_color = self.G.nodes[endcap_id]['color']
-            plt.get_current_fig_manager().set_window_title(f"Select #{endcap_id} endcap ({endcap_color})")
-
-            def get_point(event):
-                if event.xdata and event.ydata:
-                    x = int(round(event.xdata))
-                    y = int(round(event.ydata))
-                    rgb = list(rgb_im_copy[y, x])
-                    hsv = list(hsv_im[y, x])
-                    Z = float(depth_im[y, x])
-                    X = float((x - cx) * Z / fx)
-                    Y = float((y - cy) * Z / fy)
-                    if Z == 0:
-                        print(f"2D pos: ({x}, {y}), 3D pos: N/A, rgb: {rgb}, hsv: {hsv}")
-                    else:
-                        print(f"2D pos: ({x}, {y}), 3D pos: ({X:.3f}, {Y:.3f}, {Z:.3f}), rgb: {rgb}, hsv: {hsv}")
-                    return {'pos_2d': [x, y], 'pos_3d': [X, Y, Z], 'rgb': rgb, 'hsv': hsv}
-
-            def mouse_click_callback(event):
-                global endcap_id
-                global endcap_color
-
-                point = get_point(event)
-                if point and point['pos_3d'][-1] != 0:
-                    print("===========================================================================================")
-                    print(f"#{endcap_id} endcap ({self.G.nodes[endcap_id]['color']})")
-                    pprint.pprint(point)
-                    print("===========================================================================================")
-                    self.data_cfg['init_endcap_pos'][str(endcap_id)] = point['pos_3d']
-
-                    # check whether this point is in the HSV range of the endcap color
-                    lowerb, upperb = self.data_cfg['hsv_ranges'][endcap_color]
-                    print(endcap_color)
-                    print(lowerb)
-                    print(upperb)
-                    hsv = point['hsv']
-                    if np.any(hsv < np.asarray(lowerb)) or np.any(hsv > np.asarray(upperb)):
-                        self.G.nodes[endcap_id]['confidence'] = 0
-                    else:
-                        self.G.nodes[endcap_id]['confidence'] = 1
-
-                    endcap_id += 1
-                    if endcap_id < len(self.G.nodes):
-                        endcap_color = self.G.nodes[endcap_id]['color']
-                        plt.get_current_fig_manager().set_window_title(f"Select #{endcap_id} endcap ({endcap_color})")
-                    else:
-                        plt.close()
-
-            fig.canvas.mpl_connect('motion_notify_event', get_point)
-            fig.canvas.mpl_connect('button_press_event', mouse_click_callback)
-            plt.show()
+                # check whether this point is in the HSV range of the endcap color
+                endcap_color = self.G.nodes[endcap_id]['color']
+                lower_bound, upper_bound = self.data_cfg['hsv_ranges'][endcap_color]
+                x = int(np.round(pos[0] * fx / pos[2] + cx))
+                y = int(np.round(pos[1] * fy / pos[2] + cy))
+                hsv = hsv_im[y, x]
+                if np.any(hsv < np.asarray(lower_bound)) or np.any(hsv > np.asarray(upper_bound)):
+                    self.G.nodes[endcap_id]['confidence'] = 0
+                    print(f"The HSV value {hsv} of {endcap_id = } is not within the HSV threshold. "
+                          f"HSV {lower_bound = }, {upper_bound = }"
+                          f"Either a random point is picked or the HSV threshold has to be updated.")
+                else:
+                    self.G.nodes[endcap_id]['confidence'] = 1
 
         # -------------------- optimize once --------------------
         for _, (u, v) in self.data_cfg['color_to_rod'].items():
@@ -267,6 +226,18 @@ class Tracker:
         response = InitTrackerResponse()
         response.success = True
         return response
+    
+    @staticmethod
+    def pick_points(pcd):
+        print("1) Please pick at least three correspondences using [shift + left click]")
+        print("   Press [shift + right click] to undo point picking")
+        print("2) After picking points, press 'Q' to close the window")
+        vis = o3d.visualization.VisualizerWithEditing()
+        vis.create_window()
+        vis.add_geometry(pcd)
+        vis.run()  # user picks points
+        vis.destroy_window()
+        return vis.get_picked_points()
 
     def compute_obs_pts(self, depth_im, mask):
         fx, fy = self.data_cfg['cam_intr'][0][0], self.data_cfg['cam_intr'][1][1]
