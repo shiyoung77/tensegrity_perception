@@ -7,10 +7,11 @@ from tqdm import tqdm  # pip install tqdm
 from tqdm.contrib import tenumerate
 # use opencv-contrib-python: 4.2.0.32(python2)/4.2.0.34(python3)  (These versions do not have Qthread issues.)
 # pip uninstall opencv-python; pip install opencv-contrib-python==4.2.0.32
+import sys
 
 # ---------------------- change this------------------------
-dataset = os.path.expanduser('~/dataset/tensegrity/yale/')
-video_folder = 'carpet42'
+dataset = os.path.expanduser('../../data')
+video_folder = sys.argv[1]
 # ---------------------- change this------------------------
 
 prefixes = sorted([i.split('.')[0] for i in os.listdir(os.path.join(dataset, video_folder, 'color'))])
