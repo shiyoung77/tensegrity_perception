@@ -4,9 +4,10 @@ import open3d as o3d
 import numpy as np
 import cv2
 import matplotlib.pyplot as plt
+import sys
 
-dataset = 'dataset/dusk_13'
-with open(os.path.join(dataset, 'cam_config.json'), 'r') as f:
+dataset = 'dataset/' + sys.argv[1]
+with open(os.path.join(dataset, 'config.json'), 'r') as f:
     cam_info = json.load(f)
 
 prefix = 0
