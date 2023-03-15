@@ -235,6 +235,11 @@ class Tracker:
         vis = o3d.visualization.VisualizerWithEditing()
         vis.create_window()
         vis.add_geometry(pcd)
+        # # visualize the world frame
+        # world_frame = o3d.geometry.TriangleMesh().create_coordinate_frame(size=0.2)
+        # world_frame.transform(self.data_cfg['cam_extr'])
+        # o3d.visualization.draw_geometries([pcd, world_frame])
+        # #####
         vis.run()  # user picks points
         vis.destroy_window()
         return vis.get_picked_points()
@@ -434,7 +439,7 @@ class Tracker:
             y = int(np.round((XYZ[0] * fx / XYZ[2]) + cx))
             x = int(np.round((XYZ[1] * fy / XYZ[2]) + cy))
             traj_im = cv2.circle(traj_im, (x,y), radius=5, color=(0, 0, 255), thickness=-1)
-            print(x,y)
+            # print(x,y)
         trajectory_im_msg = self.bridge.cv2_to_imgmsg(traj_im,'rgb8')
         trajectory_im_msg.header.stamp = rgb_msg.header.stamp
         self.trajectory_pub.publish(trajectory_im_msg)
