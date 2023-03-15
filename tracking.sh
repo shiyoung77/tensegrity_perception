@@ -1,18 +1,20 @@
 #!/bin/bash
 
-DATASET="dataset"
+DATASET="/home/lsy/dataset/tensegrity/yale"
 
 # VIDEO_LIST=({0001..0016})
 # VIDEO_LIST=($(ls $DATASET))
 # VIDEO_LIST=("pebbles9")
 VIDEO_LIST=("evenlowercamera_3")
 # VIDEO_LIST=($(ls $DATASET | grep -E "R2S2Rcrawling"))
+# VIDEO_LIST=("R2S2Rrolling_1")
+# VIDEO_LIST=($(ls $DATASET | grep -E "20deg"))
 
 METHOD="proposed"
 START_FRAME=0
 END_FRAME=10000  # exclusive
 
-echo ${VIDEO_LIST[@]}
+echo "${VIDEO_LIST[@]}"
 echo "# videos: ${#VIDEO_LIST[@]}"
 
 for VIDEO in ${VIDEO_LIST[@]}; do
