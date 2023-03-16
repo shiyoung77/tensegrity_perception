@@ -435,11 +435,15 @@ class Tracker:
         for point in strain_msg.trajectory.trajectory:
             this_point = np.array([[point.x],[point.y],[0],[1]])
             XYZ = np.matmul(H,this_point)
+            # UVW = np.matmul(cam_intr,XYZ[:3,:])
             # for i in range(XYZ.shape[0]):
-            y = int(np.round((XYZ[0] * fx / XYZ[2]) + cx))
-            x = int(np.round((XYZ[1] * fy / XYZ[2]) + cy))
-            traj_im = cv2.circle(traj_im, (x,y), radius=5, color=(0, 0, 255), thickness=-1)
-            # print(x,y)
+            x = int(np.round((XYZ[0] * fx / XYZ[2]) + cx))
+            y = int(np.round((XYZ[1] * fy / XYZ[2]) + cy))
+            # x = np.round(UVW[0]/UVW[2])
+            # y = np.round(UVW[1]/UVW[2])
+            print(x,y)
+            traj_im = cv2.circle(traj_im, (x,y), radius=3, color=(0, 0, 255), thickness=-1)
+            # print(x,y,z)
         trajectory_im_msg = self.bridge.cv2_to_imgmsg(traj_im,'rgb8')
         trajectory_im_msg.header.stamp = rgb_msg.header.stamp
         self.trajectory_pub.publish(trajectory_im_msg)
