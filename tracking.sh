@@ -1,13 +1,14 @@
 #!/bin/bash
 
-DATASET="/home/lsy/dataset/tensegrity/yale"
+DATASET="/home/lsy/dataset/tensegrity"
 
 # VIDEO_LIST=({0001..0016})
 # VIDEO_LIST=($(ls $DATASET))
 # VIDEO_LIST=("pebbles9")
-VIDEO_LIST=("evenlowercamera_3")
+# VIDEO_LIST=("evenlowercamera_3")
 # VIDEO_LIST=($(ls $DATASET | grep -E "R2S2Rcrawling"))
 # VIDEO_LIST=("R2S2Rrolling_1")
+VIDEO_LIST=("2023-04-18_17-31-48")
 # VIDEO_LIST=($(ls $DATASET | grep -E "20deg"))
 
 METHOD="proposed"
@@ -34,12 +35,12 @@ for VIDEO in ${VIDEO_LIST[@]}; do
         --method $METHOD \
         --start_frame $START_FRAME \
         --end_frame $END_FRAME \
-        --num_dummy_points 50 \
+        --num_dummy_points 1 \
         --dummy_weights 0.5 \
         --render_scale 1 \
-        --max_correspondence_distances 0.3 0.25 0.2 0.15 0.1 0.07 0.05 0.05 0.05 \
+        --max_correspondence_distances 0.3 0.25 0.2 0.15 0.1 0.05 0.05 \
         --use_adaptive_weights \
-        --optimize_every_n_iters 0 \
+        --optimize_every_n_iters 1 \
         --add_ground_constraints \
         --add_physical_constraints \
         --filter_observed_pts \
@@ -48,7 +49,7 @@ for VIDEO in ${VIDEO_LIST[@]}; do
 
     ffmpeg -r 10 -i "$DATASET/$VIDEO/estimation_vis-${METHOD}/%04d.jpg" \
         -start_number $START_FRAME \
-        -vframes $(expr $END_FRAME - $START_FRAME) \
+        -vframes $((END_FRAME - START_FRAME)) \
         "$DATASET/$VIDEO/estimation.mp4"
 
     # ffmpeg -i $DATASET/$VIDEO/estimation.mp4 \
