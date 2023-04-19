@@ -2,6 +2,7 @@
 
 import os
 import time
+import datetime
 import json
 import copy
 import pprint
@@ -118,10 +119,22 @@ class Tracker:
         self.count = 0
         self.prev_timestamp = 0
         # ros publisher
-        self.perception_topic = "/tracking_images"
+        # self.perception_topic = "/tracking_images"
         self.trajectory_topic = "/trajectory_images"
-        self.perception_pub = rospy.Publisher(self.perception_topic, Image, queue_size=10)
+        # self.perception_pub = rospy.Publisher(self.perception_topic, Image, queue_size=10)
         self.trajectory_pub = rospy.Publisher(self.trajectory_topic, Image, queue_size=10)
+
+        # saving data
+        self.output_dir = "/home/willjohnson/catkin_ws/src/tensegrity/data/" + datetime.datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
+        self.color_dir = os.path.join(self.output_dir, 'color')
+        self.depth_dir = os.path.join(self.output_dir, 'depth')
+        self.track_dir = os.path.join(self.output_dir, 'tracking')
+        self.data_dir = os.path.join(self.output_dir, 'data')
+        os.mkdir(self.output_dir)
+        os.mkdir(self.color_dir)
+        os.mkdir(self.depth_dir)
+        os.mkdir(self.track_dir)
+        os.mkdir(self.data_dir)
         # ===========================================================================
 
         self.bridge = CvBridge()
@@ -222,6 +235,23 @@ class Tracker:
             o3d.visualization.draw_geometries([pcd, frame])
             # o3d.visualization.draw_geometries_with_editing([pcd])
 
+        # save trajectory information
+        self.trajectory = []
+        H = np.array(self.data_cfg['cam_extr'])
+        E = np.zeros((4,4))
+        E[:3,:3] = H[:3,:3].T
+        E[:3,3:] = -np.matmul(H[:3,:3].T,H[:3,3:])
+        E[3,3] = 1
+        cam_intr = np.array(self.data_cfg['cam_intr'])
+        fx, fy = cam_intr[0, 0], cam_intr[1, 1]
+        cx, cy = cam_intr[0, 2], cam_intr[1, 2]
+        for i in range(len(req.trajectory_x.data)):
+            this_point = np.array([[req.trajectory_x.data[i]],[req.trajectory_y.data[i]],[0],[1]])
+            XYZ = np.matmul(E,this_point)
+            x = int(np.round((XYZ[0] * fx / XYZ[2]) + cx))
+            y = int(np.round((XYZ[1] * fy / XYZ[2]) + cy))
+            self.trajectory.append([x,y])
+
         self.initialized = True
         response = InitTrackerResponse()
         response.success = True
@@ -281,15 +311,15 @@ class Tracker:
 
     def tracking_callback(self, rgb_msg, depth_msg, strain_msg):
         # print("I entered a new callback")
-        self.count += 1
-        """
-        this_timestamp = rgb_msg.header.stamp.to_sec()
-        # skip frames to run real-time at 10 Hz
-        if this_timestamp - self.prev_timestamp < 0.1:
-            print("Ignoring tracking frame " + str(self.count))
-            return
-        self.prev_timestamp = this_timestamp
-        """
+        # self.count += 1
+        
+        # this_timestamp = rgb_msg.header.stamp.to_sec()
+        # # skip frames to run real-time at 10 Hz
+        # if this_timestamp - self.prev_timestamp < 0.1:
+        #     print("Ignoring tracking frame " + str(self.count))
+        #     return
+        # self.prev_timestamp = this_timestamp
+    
         print("Processing tracking frame " + str(self.count))
 
         if not self.initialized:
@@ -415,34 +445,83 @@ class Tracker:
         # if key == ord('q'):
         #     exit(0)
 
-        # print('Visualizing result...')
         # visualize tracking
         tracking_result_im = self.get_2d_vis_fast()
-        # print('got 2d vis fast')
-        # tracking_result_bgr = cv2.cvtColor(tracking_result_im, cv2.COLOR_RGB2BGR)
-        # print('converted to BGR')
-        tracking_msg = self.bridge.cv2_to_imgmsg(tracking_result_im,'rgb8')
-        tracking_msg.header.stamp = rgb_msg.header.stamp
-        # print('publishing result')
-        self.perception_pub.publish(tracking_msg)
+        # tracking_msg = self.bridge.cv2_to_imgmsg(tracking_result_im,'rgb8')
+        # tracking_msg.header.stamp = rgb_msg.header.stamp
+        # self.perception_pub.publish(tracking_msg)
 
-        # experimental work on plotting the trajectory on the camera's image
-        traj_im = self.rgb_im
+        # visualize the trajectory on the camera's image
+        # traj_im = self.rgb_im
+        traj_im = tracking_result_im
+        
         H = np.array(self.data_cfg['cam_extr'])
+        E = np.zeros((4,4))
+        E[:3,:3] = H[:3,:3].T
+        E[:3,3:] = -np.matmul(H[:3,:3].T,H[:3,3:])
+        E[3,3] = 1
         cam_intr = np.array(self.data_cfg['cam_intr'])
         fx, fy = cam_intr[0, 0], cam_intr[1, 1]
         cx, cy = cam_intr[0, 2], cam_intr[1, 2]
+        """
         for point in strain_msg.trajectory.trajectory:
             this_point = np.array([[point.x],[point.y],[0],[1]])
-            XYZ = np.matmul(H,this_point)
+            XYZ = np.matmul(E,this_point)
+            # UVW = np.matmul(cam_intr,XYZ[:3,:])
             # for i in range(XYZ.shape[0]):
-            y = int(np.round((XYZ[0] * fx / XYZ[2]) + cx))
-            x = int(np.round((XYZ[1] * fy / XYZ[2]) + cy))
-            traj_im = cv2.circle(traj_im, (x,y), radius=5, color=(0, 0, 255), thickness=-1)
+            x = int(np.round((XYZ[0] * fx / XYZ[2]) + cx))
+            y = int(np.round((XYZ[1] * fy / XYZ[2]) + cy))
+            # x = np.round(UVW[0]/UVW[2])
+            # y = np.round(UVW[1]/UVW[2])
             # print(x,y)
+        """
+
+        for x,y in self.trajectory:
+            traj_im = cv2.circle(traj_im, (x,y), radius=2, color=(0, 255, 255), thickness=-1)
+            # print(x,y,z)
+
+        for point in strain_msg.trajectory.COMs:
+            this_point = np.array([[point.x],[point.y],[0],[1]])
+            XYZ = np.matmul(E,this_point)
+            x = int(np.round((XYZ[0] * fx / XYZ[2]) + cx))
+            y = int(np.round((XYZ[1] * fy / XYZ[2]) + cy))
+            traj_im = cv2.circle(traj_im, (x,y), radius=5, color=(0,0,0), thickness=-1)
+
+        for i in range(len(strain_msg.trajectory.PAs)):
+            x,y = strain_msg.trajectory.COMs[i].x,strain_msg.trajectory.COMs[i].y
+            com_point = np.array([[x],[y],[0],[1]])
+            tip_point = np.array([[x + strain_msg.trajectory.PAs[i].x*0.15],[y + strain_msg.trajectory.PAs[i].y*0.15],[0],[1]])
+            XYZcom = np.matmul(E,com_point)
+            XYZtip = np.matmul(E,tip_point)
+            x = int(np.round((XYZcom[0] * fx / XYZcom[2]) + cx))
+            y = int(np.round((XYZcom[1] * fy / XYZcom[2]) + cy))
+            a = int(np.round((XYZtip[0] * fx / XYZtip[2]) + cx))
+            b = int(np.round((XYZtip[1] * fy / XYZtip[2]) + cy))
+            traj_im = cv2.line(traj_im, (x,y), (a,b), color=(230,126,224), thickness=3)
+
         trajectory_im_msg = self.bridge.cv2_to_imgmsg(traj_im,'rgb8')
         trajectory_im_msg.header.stamp = rgb_msg.header.stamp
         self.trajectory_pub.publish(trajectory_im_msg)
+
+        # save the data
+        cv2.imwrite(os.path.join(self.color_dir, str(self.count).zfill(4) + ".png"), cv2.cvtColor(self.rgb_im,cv2.COLOR_RGB2BGR))
+        cv2.imwrite(os.path.join(self.depth_dir, str(self.count).zfill(4) + ".png"), self.depth_im)
+        cv2.imwrite(os.path.join(self.track_dir, str(self.count).zfill(4) + ".png"), cv2.cvtColor(traj_im,cv2.COLOR_RGB2BGR))
+        data = {}
+        data['header'] = {'seq':strain_msg.header.seq,'secs':strain_msg.header.stamp.to_sec()}
+        data['info'] = {'min_length':strain_msg.info.min_length,'RANGE':strain_msg.info.RANGE,'RANGE024':strain_msg.info.RANGE024,'RANGE135':strain_msg.info.RANGE135,'MAX_RANGE':strain_msg.info.MAX_RANGE,'MIN_RANGE':strain_msg.info.MIN_RANGE,'max_speed':strain_msg.info.max_speed,'tol':strain_msg.info.tol,'low_tol':strain_msg.info.low_tol,'P':strain_msg.info.P,'I':strain_msg.info.I,'D':strain_msg.info.D}
+        data['motors'] = {}
+        for motor in strain_msg.motors:
+            data['motors'][motor.id] = {'target':motor.target,'position':motor.position,'speed':motor.speed,'done':motor.done}
+        data['sensors'] = {}
+        for sensor in strain_msg.sensors:
+            data['sensors'][sensor.id] = {'length':sensor.length,'capacitance':sensor.capacitance}
+        data['trajectory'] = {i:{'x':point.x,'y':point.y} for i,point in enumerate(strain_msg.trajectory.trajectory)}
+        data['COM'] = {i:{'x':point.x,'y':point.y} for i,point in enumerate(strain_msg.trajectory.COMs)}
+        data['PA'] = {i:{'x':point.x,'y':point.y} for i,point in enumerate(strain_msg.trajectory.PAs)}
+        data['action'] = {str(i):act for i,act in enumerate(strain_msg.actions)}
+        json.dump(data,open(os.path.join(self.data_dir, str(self.count).zfill(4) + ".json"),'w'))
+        self.count += 1
 
         # cv2.imshow('Tracking Result',tracking_result_bgr)
         # print('showing result')
@@ -901,12 +980,13 @@ class Tracker:
     def get_2d_vis_fast(self):
         H, W = self.data_cfg['im_h'], self.data_cfg['im_w']
         vis_im_overlapping, vis_im_endcap_only = self.render_current_state_fast()
-        vis_im = np.empty((H*2, W*2, 3), dtype=np.uint8)
-        vis_im[:H, :W] = self.rgb_im
-        vis_im[H:, :W] = self.obs_vis
-        vis_im[:H, W:] = vis_im_overlapping
-        vis_im[H:, W:] = vis_im_endcap_only
-        return vis_im
+        # vis_im = np.empty((H*2, W*2, 3), dtype=np.uint8)
+        # vis_im[:H, :W] = self.rgb_im
+        # vis_im[H:, :W] = self.obs_vis
+        # vis_im[:H, W:] = vis_im_overlapping
+        # vis_im[H:, W:] = vis_im_endcap_only
+        # return vis_im
+        return vis_im_overlapping
 
 
 def main():

@@ -2,6 +2,7 @@ import os
 import json
 import open3d as o3d
 import numpy as np
+import sys
 import cv2
 
 
@@ -36,8 +37,9 @@ def create_pcd(depth_im: np.ndarray,
 
 
 def main():
-    dataset = "/mnt/evo/dataset/tensegrity/R2S2Rrolling_1"
-    with open(os.path.join(dataset, 'config.json'), 'r') as f:
+    dataset = "/home/willjohnson/catkin_ws/src/tensegrity/data/" + sys.argv[1]
+    calibration_path = "/home/willjohnson/catkin_ws/src/tensegrity_perception/configs/"
+    with open(os.path.join(calibration_path, 'data_cfg.json'), 'r') as f:
         cam_info = json.load(f)
     cam_intr = cam_info['cam_intr']
     cam_extr = cam_info['cam_extr']
