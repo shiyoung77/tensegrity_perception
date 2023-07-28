@@ -497,15 +497,27 @@ class Tracker:
             y = int(np.round((XYZcom[1] * fy / XYZcom[2]) + cy))
             a = int(np.round((XYZtip[0] * fx / XYZtip[2]) + cx))
             b = int(np.round((XYZtip[1] * fy / XYZtip[2]) + cy))
-            traj_im = cv2.line(traj_im, (x,y), (a,b), color=(230,126,224), thickness=3)
+            traj_im = cv2.line(traj_im, (x,y), (a,b), color=(230,196-70*i,224), thickness=3)
 
         trajectory_im_msg = self.bridge.cv2_to_imgmsg(traj_im,'rgb8')
         trajectory_im_msg.header.stamp = rgb_msg.header.stamp
         self.trajectory_pub.publish(trajectory_im_msg)
 
+        # get current endcap estimate
+        endcaps = []
+        for color in self.data_cfg['end_cap_colors']:
+            u, v = self.data_cfg['color_to_rod'][color]
+            T = self.G.edges[u, v]['pose_list'][-1].copy()
+            T = np.matmul(self.data_cfg['cam_extr'],T)
+            R = T[:3, :3]
+            t = T[:3, 3]
+            unit_vector = R[:,2]
+            endcaps.append(t + self.data_cfg['rod_length']/2*unit_vector)
+            endcaps.append(t - self.data_cfg['rod_length']/2*unit_vector)
+
         # save the data
         cv2.imwrite(os.path.join(self.color_dir, str(self.count).zfill(4) + ".png"), cv2.cvtColor(self.rgb_im,cv2.COLOR_RGB2BGR))
-        cv2.imwrite(os.path.join(self.depth_dir, str(self.count).zfill(4) + ".png"), self.depth_im)
+        cv2.imwrite(os.path.join(self.depth_dir, str(self.count).zfill(4) + ".png"), self.bridge.imgmsg_to_cv2(depth_msg, 'mono16'))
         cv2.imwrite(os.path.join(self.track_dir, str(self.count).zfill(4) + ".png"), cv2.cvtColor(traj_im,cv2.COLOR_RGB2BGR))
         data = {}
         data['header'] = {'seq':strain_msg.header.seq,'secs':strain_msg.header.stamp.to_sec()}
@@ -520,6 +532,7 @@ class Tracker:
         data['COM'] = {i:{'x':point.x,'y':point.y} for i,point in enumerate(strain_msg.trajectory.COMs)}
         data['PA'] = {i:{'x':point.x,'y':point.y} for i,point in enumerate(strain_msg.trajectory.PAs)}
         data['action'] = {str(i):act for i,act in enumerate(strain_msg.actions)}
+        data['endcaps'] = {i:{'x':end[0],'y':end[1],'z':end[2]} for i,end in enumerate(endcaps)}
         json.dump(data,open(os.path.join(self.data_dir, str(self.count).zfill(4) + ".json"),'w'))
         self.count += 1
 
