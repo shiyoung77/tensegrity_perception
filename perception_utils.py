@@ -2,7 +2,7 @@ import time
 import copy
 import open3d as o3d
 import numpy as np
-import scipy.linalg as la
+import numpy.linalg as la
 
 
 def timeit(f, n=1, need_compile=False):
@@ -23,7 +23,7 @@ def create_pcd(depth_im: np.ndarray,
                cam_intr: np.ndarray,
                color_im: np.ndarray = None,
                depth_scale: float = 1,
-               depth_trunc: float = 1.5,
+               depth_trunc: float = 3,
                cam_extr: np.ndarray = np.eye(4)):
 
     intrinsic_o3d = o3d.camera.PinholeCameraIntrinsic()
@@ -31,12 +31,16 @@ def create_pcd(depth_im: np.ndarray,
     depth_im_o3d = o3d.geometry.Image(depth_im)
     if color_im is not None:
         color_im_o3d = o3d.geometry.Image(color_im)
-        rgbd = o3d.geometry.RGBDImage.create_from_color_and_depth(color_im_o3d, depth_im_o3d,
-            depth_scale=depth_scale, depth_trunc=depth_trunc, convert_rgb_to_intensity=False)
-        pcd = o3d.geometry.PointCloud.create_from_rgbd_image(rgbd, intrinsic_o3d, extrinsic=cam_extr)
+        rgbd = o3d.geometry.RGBDImage().create_from_color_and_depth(
+            color_im_o3d, depth_im_o3d,
+            depth_scale=depth_scale, depth_trunc=depth_trunc, convert_rgb_to_intensity=False
+        )
+        pcd = o3d.geometry.PointCloud().create_from_rgbd_image(rgbd, intrinsic_o3d, extrinsic=cam_extr)
     else:
-        pcd = o3d.geometry.PointCloud.create_from_depth_image(depth_im_o3d, intrinsic_o3d, extrinsic=cam_extr,
-                                                              depth_scale=depth_scale, depth_trunc=depth_trunc)
+        pcd = o3d.geometry.PointCloud().create_from_depth_image(
+            depth_im_o3d, intrinsic_o3d,
+            extrinsic=cam_extr, depth_scale=depth_scale, depth_trunc=depth_trunc
+        )
     return pcd
 
 
@@ -72,6 +76,7 @@ def plane_detection_ransac(pcd: o3d.geometry.PointCloud,
         inlier_thresh (float): [inlier distance threshold between a point to a plain]
         max_iterations (int): [max number of iteration to perform for RANSAC]
         early_stop_thresh (float): [inlier ratio to stop RANSAC early]
+        visualize (bool): whether to visualize
 
     Return:
         frame (np.ndarray): [z_dir is the estimated plane normal towards the camera, x_dir and y_dir randomly sampled]
@@ -138,7 +143,7 @@ def plane_detection_ransac(pcd: o3d.geometry.PointCloud,
 
 
 def generate_coordinate_frame(T, scale=0.05):
-    mesh = o3d.geometry.TriangleMesh.create_coordinate_frame()
+    mesh = o3d.geometry.TriangleMesh().create_coordinate_frame()
     mesh.scale(scale, center=np.array([0, 0, 0]))
     return mesh.transform(T)
 
@@ -157,7 +162,6 @@ def kabsch(Q: np.ndarray, P: np.ndarray):
 
     H = (Q - Q_mean) @ (P - P_mean).T
     U, _, V_t = la.svd(H)
-    R = U @ V_t
 
     # ensure that R is in the right-hand coordinate system, very important!!!
     d = np.sign(la.det(U @ V_t))
@@ -176,7 +180,7 @@ def kabsch(Q: np.ndarray, P: np.ndarray):
 
 
 def vis_pcd(pcd) -> None:
-    mesh_frame = o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.1, origin=[0, 0, 0])
+    mesh_frame = o3d.geometry.TriangleMesh().create_coordinate_frame(size=0.1, origin=[0, 0, 0])
     if isinstance(pcd, o3d.geometry.PointCloud):
         o3d.visualization.draw_geometries([mesh_frame, pcd])
     else:

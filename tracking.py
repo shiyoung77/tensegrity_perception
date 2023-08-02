@@ -451,12 +451,13 @@ class Tracker:
                     continue
 
                 factor = 0.2
-                c_u = self.G.nodes[u].get('confidence', 1)
-                c_v = self.G.nodes[v].get('confidence', 1)
-                if c_u > 0.5 and c_v > 0.5:
-                    factor = 0
-                elif c_u > 0.2 and c_v > 0.2:
-                    factor *= (1 - 0.5*(c_u + c_v))
+                if self.cfg.use_adaptive_weights:
+                    c_u = self.G.nodes[u].get('confidence', 1)
+                    c_v = self.G.nodes[v].get('confidence', 1)
+                    if c_u > 0.5 and c_v > 0.5:
+                        factor = 0
+                    elif c_u > 0.2 and c_v > 0.2:
+                        factor *= (1 - 0.5*(c_u + c_v))
 
                 u_pos = X[(3 * u):(3 * u + 3)]
                 v_pos = X[(3 * v):(3 * v + 3)]
@@ -486,12 +487,13 @@ class Tracker:
                     continue
 
                 factor = 0.2
-                c_u = self.G.nodes[u].get('confidence', 1)
-                c_v = self.G.nodes[v].get('confidence', 1)
-                if c_u > 0.5 and c_v > 0.5:
-                    factor = 0
-                elif c_u > 0.2 and c_v > 0.2:
-                    factor *= (1 - 0.5 * (c_u + c_v))
+                if self.cfg.use_adaptive_weights:
+                    c_u = self.G.nodes[u].get('confidence', 1)
+                    c_v = self.G.nodes[v].get('confidence', 1)
+                    if c_u > 0.5 and c_v > 0.5:
+                        factor = 0
+                    elif c_u > 0.2 and c_v > 0.2:
+                        factor *= (1 - 0.5 * (c_u + c_v))
 
                 u_pos = X[(3 * u):(3 * u + 3)]
                 v_pos = X[(3 * v):(3 * v + 3)]
