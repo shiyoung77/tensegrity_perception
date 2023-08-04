@@ -56,6 +56,7 @@ add_service_files(
   FILES
   InitTracker.srv
   GetPose.srv
+  GetBarHeight.srv
 )
 
 ## Generate actions in the 'action' folder

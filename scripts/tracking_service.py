@@ -37,6 +37,7 @@ from tensegrity.msg import SensorsStamped, TensegrityStamped
 # ===========================================================================
 from tensegrity_perception.srv import InitTracker, InitTrackerRequest, InitTrackerResponse
 from tensegrity_perception.srv import GetPose, GetPoseRequest, GetPoseResponse
+from tensegrity_perception.srv import GetBarHeight, GetBarHeightRequest, GetBarHeightResponse
 
 from numba import njit, prange
 
@@ -102,8 +103,10 @@ class Tracker:
         # ros service
         self.init_tracker_srv_name = 'init_tracker'
         self.get_pose_srv_name = 'get_pose'
+        self.get_bar_height_srv_name = 'get_bar_height'
         self.init_tracker_srv = rospy.Service(self.init_tracker_srv_name, InitTracker, self.initialize_tracker)
         self.get_pose_srv = rospy.Service(self.get_pose_srv_name, GetPose, self.get_current_state)
+        self.get_bar_height_srv = rospy.Service(self.get_bar_height_srv_name, GetBarHeight, self.get_bar_height)
 
         # ros subscriber
         # =============================== Untested ==================================
@@ -168,6 +171,55 @@ class Tracker:
         # cv2.imshow('Tracking Result',self.get_2d_vis_fast())
         # cv2.waitKey(500)
 
+        return response
+
+    @staticmethod
+    def height_1d_ransac(pts, max_iterations=100, inlier_thresh=0.005):
+        num_pts = pts.shape[0]
+        heights = pts[:, 2]
+        max_num_inliers = 0
+        height = 0
+        for _ in range(max_iterations):
+            selected_index = np.random.choice(num_pts, size=1, replace=False)
+            selected_height = heights[selected_index]
+            num_inliers = np.sum(np.abs(heights - selected_height) < inlier_thresh)
+            if num_inliers > max_num_inliers:
+                max_num_inliers = num_inliers
+                height = selected_height
+        max_inlier_ratio = max_num_inliers / num_pts
+        return height, max_inlier_ratio
+
+    def get_bar_height(self, req: GetBarHeightRequest):
+        rospy.loginfo(f"Received '{self.get_bar_height_srv_name}' service request.")
+        response = GetBarHeightResponse()
+        try:
+            response.success = True
+            cam_intr = np.asarray(self.data_cfg['cam_intr'])
+            pcd = create_pcd(self.depth_im, cam_intr, self.rgb_im, depth_trunc=self.data_cfg['depth_trunc'])
+            pcd.transform(np.linalg.inv(self.data_cfg['cam_extr']))  # cam frame to world frame
+
+            # test hsv values of the bar
+            # pt_indices = self.pick_points(pcd)
+            # normalized_rgb_values = np.asarray(pcd.colors)[pt_indices]
+            # rgb_values = (normalized_rgb_values * 255).astype(np.uint8)
+            # hsv_values = cv2.cvtColor(rgb_values[None], cv2.COLOR_RGB2HSV)
+            # print(f'{hsv_values = }')  # [(23, 180, 200), (23, 200, 200), ...]
+
+            pcd_colors = (np.asarray(pcd.colors) * 255).astype(np.uint8)
+            hsv_values = cv2.cvtColor(pcd_colors[None], cv2.COLOR_RGB2HSV)
+            mask = cv2.inRange(hsv_values, (20, 100, 100), (25, 255, 255))[0]
+            valid_indices = np.where(mask == 255)[0]
+            bar_pcd = pcd.select_by_index(valid_indices)
+
+            tic = time.perf_counter()
+            height, inlier_ratio = self.height_1d_ransac(np.asarray(bar_pcd.points), 300, 0.005)
+            toc = time.perf_counter()
+            print(f'{height = }, {inlier_ratio = }')
+            print(f'Computing bar height takes {toc - tic}s.')
+            response.height = height
+        except IndexError:
+            response.success = False
+            return response
         return response
 
     def initialize_tracker(self, req: InitTrackerRequest):
