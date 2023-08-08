@@ -39,7 +39,7 @@ def height_1d_ransac(pts, max_iterations=100, inlier_thresh=0.005):
 
 
 def main():
-    dataset = Path("/home/willjohnson/catkin_ws/src/tensegrity/src/tensegrity_perception/dataset/limbo_test_11").expanduser()
+    dataset = Path("/home/willjohnson/catkin_ws/src/tensegrity/src/tensegrity_perception/dataset/2023-08-08_18-05-47").expanduser()
     with open(os.path.join(dataset, 'config.json'), 'r') as f:
         cam_info = json.load(f)
     cam_intr = np.array(cam_info['cam_intr'])
