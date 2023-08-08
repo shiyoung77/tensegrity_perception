@@ -585,6 +585,7 @@ class Tracker:
         data['PA'] = {i:{'x':point.x,'y':point.y} for i,point in enumerate(strain_msg.trajectory.PAs)}
         data['action'] = {str(i):act for i,act in enumerate(strain_msg.actions)}
         data['endcaps'] = {i:{'x':end[0],'y':end[1],'z':end[2]} for i,end in enumerate(endcaps)}
+        data['segment'] = strain_msg.trajectory.trajectory_segment
         json.dump(data,open(os.path.join(self.data_dir, str(self.count).zfill(4) + ".json"),'w'))
         self.count += 1
 

@@ -39,7 +39,7 @@ def height_1d_ransac(pts, max_iterations=100, inlier_thresh=0.005):
 
 
 def main():
-    dataset = Path("~/dataset/tensegrity/limbo_test_11").expanduser()
+    dataset = Path("/home/willjohnson/catkin_ws/src/tensegrity/src/tensegrity_perception/dataset/limbo_test_11").expanduser()
     with open(os.path.join(dataset, 'config.json'), 'r') as f:
         cam_info = json.load(f)
     cam_intr = np.array(cam_info['cam_intr'])
@@ -47,7 +47,7 @@ def main():
     depth_scale = cam_info['depth_scale']
     depth_trunc = cam_info['depth_trunc']
 
-    prefix = 0
+    prefix = 0#361
     color_path = dataset / 'color' / f'{prefix:04d}.png'
     depth_path = dataset / 'depth' / f'{prefix:04d}.png'
 
@@ -55,7 +55,8 @@ def main():
     depth_im = cv2.imread(str(depth_path), cv2.IMREAD_UNCHANGED).astype(np.float32) / depth_scale
     pcd = create_pcd(depth_im, cam_intr, color_im, depth_trunc=depth_trunc)
     vis_pcd(pcd)
-    cam_extr, _ = plane_detection_o3d(pcd, inlier_thresh=0.003, max_iterations=1000, visualize=True)
+    # cam_extr, _ = plane_detection_o3d(pcd, inlier_thresh=0.003, max_iterations=1000, visualize=True)
+    cam_extr = json.load(open('../configs/data_cfg.json','r'))['cam_extr']
 
     pcd.transform(np.linalg.inv(cam_extr))
     vis_pcd(pcd)
