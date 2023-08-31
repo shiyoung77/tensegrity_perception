@@ -24,7 +24,7 @@ import pyrender
 from pyrender.constants import RenderFlags
 from easydict import EasyDict
 
-from perception_utils import create_pcd, plane_detection_ransac
+from perception_utils import create_pcd, plane_detection_ransac, plane_detection_o3d
 
 # ROS library
 import rospy
@@ -196,7 +196,8 @@ class Tracker:
             response.success = True
             cam_intr = np.asarray(self.data_cfg['cam_intr'])
             pcd = create_pcd(self.depth_im, cam_intr, self.rgb_im, depth_trunc=self.data_cfg['depth_trunc'])
-            pcd.transform(np.linalg.inv(self.data_cfg['cam_extr']))  # cam frame to world frame
+            # pcd.transform(np.linalg.inv(self.data_cfg['cam_extr']))  # cam frame to world frame
+            pcd.transform(np.linalg.inv(self.data_cfg['extr_for_height']))  # cam frame to world frame
 
             # test hsv values of the bar
             # pt_indices = self.pick_points(pcd)
@@ -217,6 +218,21 @@ class Tracker:
             print(f'{height = }, {inlier_ratio = }')
             print(f'Computing bar height takes {toc - tic}s.')
             response.height = height
+
+            # get height of highest node
+            endcaps = []
+            for color in self.data_cfg['end_cap_colors']:
+                u, v = self.data_cfg['color_to_rod'][color]
+                T = self.G.edges[u, v]['pose_list'][-1].copy()
+                T = np.matmul(self.data_cfg['extr_for_height'],T)
+                R = T[:3, :3]
+                t = T[:3, 3]
+                unit_vector = R[:,2]
+                endcaps.append(t + self.data_cfg['rod_length']/2*unit_vector)
+                endcaps.append(t - self.data_cfg['rod_length']/2*unit_vector)
+            endcap_heights = [endcap[2] for endcap in endcaps]
+            response.highest_node = max(endcap_heights)
+
         except IndexError:
             response.success = False
             return response
@@ -242,6 +258,8 @@ class Tracker:
         if 'cam_extr' not in self.data_cfg:
             plane_frame, _ = plane_detection_ransac(scene_pcd, inlier_thresh=0.003, visualize=self.cfg.visualize)
             self.data_cfg['cam_extr'] = np.round(plane_frame, decimals=3)
+
+        self.data_cfg['extr_for_height'], _ = plane_detection_o3d(scene_pcd, inlier_thresh=0.003, max_iterations=1000, visualize=False)
 
         if 'init_endcap_pos' not in self.data_cfg:
             self.data_cfg['init_endcap_pos'] = dict()
@@ -549,7 +567,7 @@ class Tracker:
             y = int(np.round((XYZcom[1] * fy / XYZcom[2]) + cy))
             a = int(np.round((XYZtip[0] * fx / XYZtip[2]) + cx))
             b = int(np.round((XYZtip[1] * fy / XYZtip[2]) + cy))
-            traj_im = cv2.line(traj_im, (x,y), (a,b), color=(230,196-70*i,224), thickness=3)
+            traj_im = cv2.line(traj_im, (x,y), (a,b), color=(230,56+70*i,224), thickness=3)
 
         trajectory_im_msg = self.bridge.cv2_to_imgmsg(traj_im,'rgb8')
         trajectory_im_msg.header.stamp = rgb_msg.header.stamp
@@ -573,7 +591,7 @@ class Tracker:
         cv2.imwrite(os.path.join(self.track_dir, str(self.count).zfill(4) + ".png"), cv2.cvtColor(traj_im,cv2.COLOR_RGB2BGR))
         data = {}
         data['header'] = {'seq':strain_msg.header.seq,'secs':strain_msg.header.stamp.to_sec()}
-        data['info'] = {'min_length':strain_msg.info.min_length,'RANGE':strain_msg.info.RANGE,'RANGE024':strain_msg.info.RANGE024,'RANGE135':strain_msg.info.RANGE135,'MAX_RANGE':strain_msg.info.MAX_RANGE,'MIN_RANGE':strain_msg.info.MIN_RANGE,'max_speed':strain_msg.info.max_speed,'tol':strain_msg.info.tol,'low_tol':strain_msg.info.low_tol,'P':strain_msg.info.P,'I':strain_msg.info.I,'D':strain_msg.info.D}
+        data['info'] = {'min_length':strain_msg.info.min_length,'RANGE':strain_msg.info.RANGE,'RANGE024':strain_msg.info.RANGE024,'RANGE135':strain_msg.info.RANGE135,'MAX_RANGE':strain_msg.info.MAX_RANGE,'MIN_RANGE':strain_msg.info.MIN_RANGE,'max_speed':strain_msg.info.max_speed,'tol':strain_msg.info.tol,'low_tol':strain_msg.info.low_tol,'P':strain_msg.info.P,'I':strain_msg.info.I,'D':strain_msg.info.D,'dist_weight':strain_msg.info.dist_weight,'ang_weight':strain_msg.info.ang_weight,'prog_weight':strain_msg.info.prog_weight}
         data['motors'] = {}
         for motor in strain_msg.motors:
             data['motors'][motor.id] = {'target':motor.target,'position':motor.position,'speed':motor.speed,'done':motor.done}
