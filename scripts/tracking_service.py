@@ -126,6 +126,7 @@ class Tracker:
         self.trajectory_topic = "/trajectory_images"
         # self.perception_pub = rospy.Publisher(self.perception_topic, Image, queue_size=10)
         self.trajectory_pub = rospy.Publisher(self.trajectory_topic, Image, queue_size=10)
+        self.latest_bar_height = 0
 
         # saving data
         self.output_dir = "/home/willjohnson/catkin_ws/src/tensegrity/data/" + datetime.datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
@@ -218,7 +219,8 @@ class Tracker:
             print(f'{height = }, {inlier_ratio = }')
             print(f'Computing bar height takes {toc - tic}s.')
             response.height = height
-
+            self.latest_bar_height = height
+            """
             # get height of highest node
             endcaps = []
             for color in self.data_cfg['end_cap_colors']:
@@ -232,7 +234,7 @@ class Tracker:
                 endcaps.append(t - self.data_cfg['rod_length']/2*unit_vector)
             endcap_heights = [endcap[2] for endcap in endcaps]
             response.highest_node = max(endcap_heights)
-
+            """
         except IndexError:
             response.success = False
             return response
@@ -260,6 +262,7 @@ class Tracker:
             self.data_cfg['cam_extr'] = np.round(plane_frame, decimals=3)
 
         self.data_cfg['extr_for_height'], _ = plane_detection_o3d(scene_pcd, inlier_thresh=0.003, max_iterations=1000, visualize=False)
+        print(self.data_cfg['extr_for_height'])
 
         if 'init_endcap_pos' not in self.data_cfg:
             self.data_cfg['init_endcap_pos'] = dict()
@@ -585,6 +588,21 @@ class Tracker:
             endcaps.append(t + self.data_cfg['rod_length']/2*unit_vector)
             endcaps.append(t - self.data_cfg['rod_length']/2*unit_vector)
 
+        # # get height of highest node
+        # endcaps = []
+        # for color in self.data_cfg['end_cap_colors']:
+        #     u, v = self.data_cfg['color_to_rod'][color]
+        #     T = self.G.edges[u, v]['pose_list'][-1].copy()
+        #     T = np.matmul(self.data_cfg['extr_for_height'],T)
+        #     R = T[:3, :3]
+        #     t = T[:3, 3]
+        #     unit_vector = R[:,2]
+        #     endcaps.append(t + self.data_cfg['rod_length']/2*unit_vector)
+        #     endcaps.append(t - self.data_cfg['rod_length']/2*unit_vector)
+        # endcap_heights = [endcap[2] for endcap in endcaps]
+        # highest_node = max(endcap_heights)
+        # print(highest_node)
+
         # save the data
         cv2.imwrite(os.path.join(self.color_dir, str(self.count).zfill(4) + ".png"), cv2.cvtColor(self.rgb_im,cv2.COLOR_RGB2BGR))
         cv2.imwrite(os.path.join(self.depth_dir, str(self.count).zfill(4) + ".png"), self.bridge.imgmsg_to_cv2(depth_msg, 'mono16'))
@@ -604,6 +622,8 @@ class Tracker:
         data['action'] = {str(i):act for i,act in enumerate(strain_msg.actions)}
         data['endcaps'] = {i:{'x':end[0],'y':end[1],'z':end[2]} for i,end in enumerate(endcaps)}
         data['segment'] = strain_msg.trajectory.trajectory_segment
+        # data['robot-height'] = highest_node
+        # data['bar-height'] = float(self.latest_bar_height)
         json.dump(data,open(os.path.join(self.data_dir, str(self.count).zfill(4) + ".json"),'w'))
         self.count += 1
 
