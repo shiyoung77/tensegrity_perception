@@ -28,6 +28,7 @@ from perception_utils import create_pcd, plane_detection_ransac, plane_detection
 
 # ROS library
 import rospy
+import rospkg
 import message_filters
 from cv_bridge import CvBridge
 from sensor_msgs.msg import Image
@@ -129,7 +130,8 @@ class Tracker:
         self.latest_bar_height = 0
 
         # saving data
-        self.output_dir = "/home/willjohnson/catkin_ws/src/tensegrity/data/" + datetime.datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
+        data_path = os.path.join(rospkg.RosPack().get_path('tensegrity_perception'),'../../data/')
+        self.output_dir = data_path + datetime.datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
         self.color_dir = os.path.join(self.output_dir, 'color')
         self.depth_dir = os.path.join(self.output_dir, 'depth')
         self.track_dir = os.path.join(self.output_dir, 'tracking')
@@ -553,12 +555,16 @@ class Tracker:
             traj_im = cv2.circle(traj_im, (x,y), radius=2, color=(0, 255, 255), thickness=-1)
             # print(x,y,z)
 
+        prev_x,prev_y = None,None
         for point in strain_msg.trajectory.COMs:
             this_point = np.array([[point.x],[point.y],[0],[1]])
             XYZ = np.matmul(E,this_point)
             x = int(np.round((XYZ[0] * fx / XYZ[2]) + cx))
             y = int(np.round((XYZ[1] * fy / XYZ[2]) + cy))
             traj_im = cv2.circle(traj_im, (x,y), radius=5, color=(0,0,0), thickness=-1)
+            if not prev_x is None:
+                traj_im = cv2.line(traj_im, (prev_x,prev_y), (x,y), color=(0,0,0), thickness=1)
+            prev_x, prev_y = x,y
 
         for i in range(len(strain_msg.trajectory.PAs)):
             x,y = strain_msg.trajectory.COMs[i].x,strain_msg.trajectory.COMs[i].y
