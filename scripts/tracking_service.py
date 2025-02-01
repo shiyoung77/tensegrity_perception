@@ -566,17 +566,17 @@ class Tracker:
                 traj_im = cv2.line(traj_im, (prev_x,prev_y), (x,y), color=(0,0,0), thickness=1)
             prev_x, prev_y = x,y
 
-        for i in range(len(strain_msg.trajectory.PAs)):
-            x,y = strain_msg.trajectory.COMs[i].x,strain_msg.trajectory.COMs[i].y
-            com_point = np.array([[x],[y],[0],[1]])
-            tip_point = np.array([[x + strain_msg.trajectory.PAs[i].x*0.15],[y + strain_msg.trajectory.PAs[i].y*0.15],[0],[1]])
-            XYZcom = np.matmul(E,com_point)
-            XYZtip = np.matmul(E,tip_point)
-            x = int(np.round((XYZcom[0] * fx / XYZcom[2]) + cx))
-            y = int(np.round((XYZcom[1] * fy / XYZcom[2]) + cy))
-            a = int(np.round((XYZtip[0] * fx / XYZtip[2]) + cx))
-            b = int(np.round((XYZtip[1] * fy / XYZtip[2]) + cy))
-            traj_im = cv2.line(traj_im, (x,y), (a,b), color=(230,56+70*i,224), thickness=3)
+        # for i in range(len(strain_msg.trajectory.PAs)):
+        #     x,y = strain_msg.trajectory.COMs[i].x,strain_msg.trajectory.COMs[i].y
+        #     com_point = np.array([[x],[y],[0],[1]])
+        #     tip_point = np.array([[x + strain_msg.trajectory.PAs[i].x*0.15],[y + strain_msg.trajectory.PAs[i].y*0.15],[0],[1]])
+        #     XYZcom = np.matmul(E,com_point)
+        #     XYZtip = np.matmul(E,tip_point)
+        #     x = int(np.round((XYZcom[0] * fx / XYZcom[2]) + cx))
+        #     y = int(np.round((XYZcom[1] * fy / XYZcom[2]) + cy))
+        #     a = int(np.round((XYZtip[0] * fx / XYZtip[2]) + cx))
+        #     b = int(np.round((XYZtip[1] * fy / XYZtip[2]) + cy))
+        #     traj_im = cv2.line(traj_im, (x,y), (a,b), color=(230,56+70*i,224), thickness=3)
 
         trajectory_im_msg = self.bridge.cv2_to_imgmsg(traj_im,'rgb8')
         trajectory_im_msg.header.stamp = rgb_msg.header.stamp
